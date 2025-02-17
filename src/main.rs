@@ -1,20 +1,16 @@
-use axum::{
-    routing::{get, post},
-    Router,
-};
+mod http_server;
+mod tcp_server;
+
+use tokio::net::TcpListener;
+
 #[tokio::main]
 async fn main() {
-    let app = Router::new()
-        .route("/", get(|| async { "Hello, World!" }))
-        .route("/register_sensor", post(register_sensor))
-        .route("/deregister_sensor", post(deregister_sensor));
+    console_subscriber::init();
 
-    let http_listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    let http_listener = TcpListener::bind("0.0.0.0:3000").await.unwrap();
 
-    let data_listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await.unwrap();
+    let data_listener = TcpListener::bind("0.0.0.0:8000").await.unwrap();
 
-    axum::serve(http_listener, app).await.unwrap();
+    tokio::spawn(crate::tcp_server::serve(data_listener));
+    crate::http_server::serve(http_listener).await;
 }
-
-async fn register_sensor() {}
-async fn deregister_sensor() {}
