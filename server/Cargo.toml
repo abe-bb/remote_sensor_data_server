@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 axum = { version = "0.8.1", features = ["tracing"]}
 console-subscriber = "0.4.1"
+serde = "1.0.217"
 tokio = { version = "1.43.0", features = ["full", "tracing",] }
 tracing = "0.1.41"
 tracing-journald = "0.3.1"

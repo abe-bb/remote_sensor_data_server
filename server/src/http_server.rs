@@ -1,7 +1,9 @@
 use axum::{
+    http::HeaderMap,
     routing::{get, post},
     Router,
 };
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 
 pub async fn serve(tcp_listener: TcpListener) {
@@ -13,5 +15,16 @@ pub async fn serve(tcp_listener: TcpListener) {
     axum::serve(tcp_listener, app).await.unwrap();
 }
 
-async fn register_sensor() {}
-async fn deregister_sensor() {}
+async fn register_sensor(headers: HeaderMap) {}
+async fn deregister_sensor(headers: HeaderMap) {}
+
+#[derive(Serialize, Deserialize)]
+struct RegisterSensor {
+    user: String,
+    sensor: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Sensor {
+    sensor_name: String,
+}
