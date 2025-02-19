@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+aes-gcm = "0.10.3"
 axum = { version = "0.8.1", features = ["tracing"]}
 console-subscriber = "0.4.1"
+rsa = { version = "0.9.7", features = ["sha2", "serde"] }
 serde = "1.0.217"
 tokio = { version = "1.43.0", features = ["full", "tracing",] }
 tracing = "0.1.41"
-tracing-journald = "0.3.1"
 tracing-subscriber = "0.3.19"
