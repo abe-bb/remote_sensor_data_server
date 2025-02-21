@@ -13,7 +13,7 @@ use axum::{
 use rsa::{
     pkcs1::EncodeRsaPublicKey,
     pkcs1v15::{Signature, VerifyingKey},
-    sha2::{digest, Sha256},
+    sha2::Sha256,
     signature::Verifier,
     Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey,
 };
@@ -22,10 +22,7 @@ use tokio::net::TcpListener;
 
 const RSA_SIZE: usize = 2048;
 
-pub async fn start(
-    tcp_listener: TcpListener,
-    authorized_users: HashMap<String, VerifyingKey<Sha256>>,
-) {
+fn create_router(authorized_users: HashMap<String, VerifyingKey<Sha256>>) -> Router {
     let mut rng = rand::thread_rng();
     let priv_key = RsaPrivateKey::new(&mut rng, RSA_SIZE).expect("Couldn't generate rsa key");
     let pub_key = RsaPublicKey::from(&priv_key);
@@ -41,6 +38,14 @@ pub async fn start(
             server_private_key: priv_key,
         }));
 
+    app
+}
+
+pub async fn start(
+    tcp_listener: TcpListener,
+    authorized_users: HashMap<String, VerifyingKey<Sha256>>,
+) {
+    let app = create_router(authorized_users);
     axum::serve(tcp_listener, app).await.unwrap();
 }
 
@@ -121,4 +126,47 @@ struct Sensor {
 struct User {
     user: String,
     public_key: String,
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn missing_headers() {
+        let app = create_router(HashMap::new());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/register_sensor")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn invalid_method() {
+        let app = create_router(HashMap::new());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/register_sensor")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
 }

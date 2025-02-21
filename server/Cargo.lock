@@ -685,6 +685,7 @@ dependencies = [
  "rsa",
  "serde",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]
