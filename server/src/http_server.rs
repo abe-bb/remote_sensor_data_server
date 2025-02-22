@@ -9,38 +9,25 @@ use axum::{
     Router,
 };
 use base64::{prelude::BASE64_STANDARD, Engine};
+use common::Sensor;
 use rsa::{
     pkcs1::EncodeRsaPublicKey,
     pkcs1v15::{Signature, VerifyingKey},
-    pkcs8::{EncodePrivateKey, EncodePublicKey},
     sha2::Sha256,
     signature::Verifier,
-    Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey,
+    RsaPrivateKey, RsaPublicKey,
 };
-use serde::{Deserialize, Serialize};
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::RwLock};
 
 const RSA_SIZE: usize = 2048;
 
-fn create_router(authorized_users: HashMap<String, VerifyingKey<Sha256>>) -> Router {
+fn create_router(
+    authorized_users: HashMap<String, VerifyingKey<Sha256>>,
+    sensors: Arc<RwLock<HashMap<String, Sensor>>>,
+) -> Router {
     let mut rng = rand::thread_rng();
     let priv_key = RsaPrivateKey::new(&mut rng, RSA_SIZE).expect("Couldn't generate rsa key");
     let pub_key = RsaPublicKey::from(&priv_key);
-
-    println!(
-        "testUser public key:\n{}",
-        pub_key
-            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-            .unwrap()
-    );
-
-    println!(
-        "\ntestUser private key:\n{}",
-        priv_key
-            .to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
-            .unwrap()
-            .as_str()
-    );
 
     let app = Router::new()
         .route("/", get(|| async { "Hello, World!" }))
@@ -50,7 +37,8 @@ fn create_router(authorized_users: HashMap<String, VerifyingKey<Sha256>>) -> Rou
         .with_state(Arc::new(AppState {
             authorized_users,
             server_public_key: pub_key,
-            server_private_key: priv_key,
+            _server_private_key: priv_key,
+            sensors,
         }));
 
     app
@@ -59,14 +47,10 @@ fn create_router(authorized_users: HashMap<String, VerifyingKey<Sha256>>) -> Rou
 pub async fn start(
     tcp_listener: TcpListener,
     authorized_users: HashMap<String, VerifyingKey<Sha256>>,
+    sensors: Arc<RwLock<HashMap<String, Sensor>>>,
 ) {
-    let app = create_router(authorized_users);
+    let app = create_router(authorized_users, sensors);
     axum::serve(tcp_listener, app).await.unwrap();
-
-    let mut rng = rand::thread_rng();
-
-    let priv_key = RsaPrivateKey::new(&mut rng, RSA_SIZE).unwrap();
-    let pub_key = RsaPublicKey::from(&priv_key);
 }
 
 async fn register_sensor(
@@ -75,16 +59,12 @@ async fn register_sensor(
     body: Bytes,
 ) -> impl IntoResponse {
     // check for appropriate headers
-    if !(headers.contains_key("user")
-        && headers.contains_key("encrypted_key")
-        && headers.contains_key("signature"))
-    {
+    if !(headers.contains_key("user") && headers.contains_key("signature")) {
         return StatusCode::BAD_REQUEST;
     }
 
-    let (user_header, key_header, signature_header) = (
+    let (user_header, signature_header) = (
         headers.get("user").unwrap(),
-        headers.get("encrypted_key").unwrap(),
         headers.get("signature").unwrap(),
     );
 
@@ -92,17 +72,11 @@ async fn register_sensor(
     let Ok(user) = user_header.to_str() else {
         return StatusCode::BAD_REQUEST;
     };
-    let Ok(encrypted_key) = key_header.to_str() else {
-        return StatusCode::BAD_REQUEST;
-    };
     let Ok(signature) = signature_header.to_str() else {
         return StatusCode::BAD_REQUEST;
     };
 
     // convert from Base64 to binary
-    let Ok(encrypted_key) = BASE64_STANDARD.decode(encrypted_key) else {
-        return StatusCode::BAD_REQUEST;
-    };
     let Ok(signature) = BASE64_STANDARD.decode(signature) else {
         return StatusCode::BAD_REQUEST;
     };
@@ -117,22 +91,32 @@ async fn register_sensor(
         return StatusCode::UNAUTHORIZED;
     }
 
-    let user_verification_key = state.authorized_users.get(user).unwrap();
-    let body = body.to_vec();
-
     // check that signature matches declared user
-    let Err(_) = user_verification_key.verify(&body[..], &signature) else {
+    let user_verification_key = state.authorized_users.get(user).unwrap();
+    let Ok(_) = user_verification_key.verify(&body[..], &signature) else {
         return StatusCode::UNAUTHORIZED;
     };
 
-    // decrypt symmetric key
-    let dec_data = state
-        .server_private_key
-        .decrypt(Pkcs1v15Encrypt, key_header.as_bytes());
+    // Deserialize sensor from body
+    let Ok(sensor): Result<Sensor, _> = serde_json::from_slice(&body) else {
+        return StatusCode::BAD_REQUEST;
+    };
+
+    // scope for write access to hashmap
+    {
+        let mut write_lock = state.sensors.write().await;
+        // check if sensor name is already taken
+        if write_lock.contains_key(&sensor.name) {
+            return StatusCode::CONFLICT;
+        }
+
+        // add new sensor
+        write_lock.insert(sensor.name.clone(), sensor);
+    } // write lock dropped
 
     StatusCode::OK
 }
-async fn deregister_sensor(headers: HeaderMap) {}
+async fn deregister_sensor(_headers: HeaderMap) {}
 
 async fn server_public_key(State(state): State<Arc<AppState>>) -> String {
     state
@@ -144,24 +128,8 @@ async fn server_public_key(State(state): State<Arc<AppState>>) -> String {
 struct AppState {
     authorized_users: HashMap<String, VerifyingKey<Sha256>>,
     server_public_key: RsaPublicKey,
-    server_private_key: RsaPrivateKey,
-}
-
-#[derive(Serialize, Deserialize)]
-struct RegisterSensor {
-    user: String,
-    sensor: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct Sensor {
-    sensor_name: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct User {
-    user: String,
-    public_key: String,
+    _server_private_key: RsaPrivateKey,
+    sensors: Arc<RwLock<HashMap<String, Sensor>>>,
 }
 
 #[cfg(test)]
@@ -169,7 +137,6 @@ mod test {
     use super::*;
     use axum::{body::Body, http::Request};
     use rsa::{
-        pkcs1::DecodeRsaPublicKey,
         pkcs1v15::SigningKey,
         pkcs8::{DecodePrivateKey, DecodePublicKey},
         signature::{SignatureEncoding, SignerMut},
@@ -227,7 +194,8 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
 
     #[tokio::test]
     async fn missing_headers() {
-        let app = create_router(HashMap::new());
+        let sensors = Arc::new(RwLock::new(HashMap::new()));
+        let app = create_router(HashMap::new(), sensors);
 
         let response = app
             .oneshot(
@@ -245,7 +213,8 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
 
     #[tokio::test]
     async fn invalid_method() {
-        let app = create_router(HashMap::new());
+        let sensors = Arc::new(RwLock::new(HashMap::new()));
+        let app = create_router(HashMap::new(), sensors);
 
         let response = app
             .oneshot(
@@ -266,7 +235,8 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
         let (mut signing_key, verifying_key) = create_user_data();
         let mut hashmap = HashMap::new();
         hashmap.insert("testUser".to_owned(), verifying_key);
-        let app = create_router(hashmap);
+        let sensors = Arc::new(RwLock::new(HashMap::new()));
+        let app = create_router(hashmap, sensors);
 
         let signature = signing_key.sign(b"junk_data");
 
@@ -291,36 +261,22 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
     async fn happy_path() {
         let (mut signing_key, verifying_key) = create_user_data();
         let mut hashmap = HashMap::new();
-        hashmap.insert("testUser".to_owned(), verifying_key);
-
-        let mut rng = rand::thread_rng();
+        hashmap.insert("testUser".to_owned(), verifying_key.clone());
 
         let listener = TcpListener::bind("localhost:8080").await.unwrap();
-        tokio::spawn(start(listener, hashmap));
+        let sensors = Arc::new(RwLock::new(HashMap::new()));
+        tokio::spawn(start(listener, hashmap, sensors));
 
-        let response = reqwest::get("http://localhost:8080/server_public_key")
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap();
+        let body = serde_json::to_string(&Sensor::new("testSensor".to_owned())).unwrap();
 
-        let server_pub_key = RsaPublicKey::from_pkcs1_pem(&response).unwrap();
-        let symmetric_key = b"test_data";
-        let enc_key = server_pub_key
-            .encrypt(&mut rng, Pkcs1v15Encrypt, &symmetric_key[..])
-            .unwrap();
-
-        let body = b"test body";
-
-        let signature = signing_key.sign(&body[..]);
+        let signature = signing_key.sign(body.as_bytes());
 
         let client = reqwest::Client::new();
         let response = client
             .post("http://localhost:8080/register_sensor")
             .header("user", "testUser")
             .header("signature", BASE64_STANDARD.encode(signature.to_bytes()))
-            .header("encrypted_key", BASE64_STANDARD.encode(enc_key))
+            .body(body)
             .send()
             .await
             .unwrap();

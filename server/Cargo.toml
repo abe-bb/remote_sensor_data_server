@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-aes-gcm = "0.10.3"
 axum = { version = "0.8.1", features = ["tracing"]}
 base64 = "0.22.1"
 rand = "0.8.0"

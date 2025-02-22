@@ -1,8 +1,12 @@
+use common::Sensor;
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::RwLock;
 
-pub async fn serve(data_listener: TcpListener) {
+pub async fn serve(data_listener: TcpListener, sensors: Arc<RwLock<HashMap<String, Sensor>>>) {
     loop {
         if let Ok((stream, socket)) = data_listener.accept().await {
             tokio::spawn(handle_data_client(stream, socket));
