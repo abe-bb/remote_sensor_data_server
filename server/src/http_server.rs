@@ -11,9 +11,10 @@ use axum::{
 use base64::{prelude::BASE64_STANDARD, Engine};
 use rsa::{
     pkcs1::EncodeRsaPublicKey,
-    pkcs1v15::{Signature, SigningKey, VerifyingKey},
+    pkcs1v15::{Signature, VerifyingKey},
+    pkcs8::{EncodePrivateKey, EncodePublicKey},
     sha2::Sha256,
-    signature::{RandomizedSigner, SignatureEncoding, Verifier},
+    signature::Verifier,
     Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey,
 };
 use serde::{Deserialize, Serialize};
@@ -26,16 +27,20 @@ fn create_router(authorized_users: HashMap<String, VerifyingKey<Sha256>>) -> Rou
     let priv_key = RsaPrivateKey::new(&mut rng, RSA_SIZE).expect("Couldn't generate rsa key");
     let pub_key = RsaPublicKey::from(&priv_key);
 
-    // tmp
-    let test = b"hello world :)";
     println!(
-        "{}",
-        pub_key.to_pkcs1_pem(rsa::pkcs8::LineEnding::LF).unwrap()
+        "testUser public key:\n{}",
+        pub_key
+            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .unwrap()
     );
-    let signature_key = SigningKey::<Sha256>::new(priv_key.clone());
-    let signature = signature_key.sign_with_rng(&mut rng, test);
-    println!("{:?}", signature.to_bytes());
-    // tmp
+
+    println!(
+        "\ntestUser private key:\n{}",
+        priv_key
+            .to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
+            .unwrap()
+            .as_str()
+    );
 
     let app = Router::new()
         .route("/", get(|| async { "Hello, World!" }))
@@ -57,6 +62,11 @@ pub async fn start(
 ) {
     let app = create_router(authorized_users);
     axum::serve(tcp_listener, app).await.unwrap();
+
+    let mut rng = rand::thread_rng();
+
+    let priv_key = RsaPrivateKey::new(&mut rng, RSA_SIZE).unwrap();
+    let pub_key = RsaPublicKey::from(&priv_key);
 }
 
 async fn register_sensor(
@@ -158,39 +168,61 @@ struct User {
 mod test {
     use super::*;
     use axum::{body::Body, http::Request};
-    use rsa::pkcs1::DecodeRsaPublicKey;
+    use rsa::{
+        pkcs1::DecodeRsaPublicKey,
+        pkcs1v15::SigningKey,
+        pkcs8::{DecodePrivateKey, DecodePublicKey},
+        signature::{SignatureEncoding, SignerMut},
+    };
     use tower::ServiceExt;
 
-    fn create_user_data() -> ([u8; 256], VerifyingKey<Sha256>) {
-        let signature: [u8; 256] = [
-            191, 192, 10, 226, 178, 177, 129, 82, 158, 43, 36, 185, 106, 65, 243, 34, 216, 95, 33,
-            35, 6, 86, 110, 26, 159, 151, 218, 247, 186, 45, 215, 36, 140, 34, 71, 215, 154, 166,
-            75, 21, 132, 215, 154, 168, 122, 93, 179, 152, 238, 5, 198, 16, 87, 116, 34, 13, 2,
-            153, 249, 194, 211, 121, 145, 6, 217, 77, 187, 69, 218, 210, 47, 211, 221, 68, 37, 35,
-            40, 45, 181, 57, 183, 241, 188, 23, 13, 23, 74, 34, 237, 219, 13, 71, 225, 73, 175,
-            120, 47, 129, 174, 53, 147, 38, 206, 108, 143, 150, 189, 75, 164, 240, 179, 57, 72,
-            115, 201, 47, 65, 124, 6, 188, 234, 16, 214, 126, 138, 243, 67, 163, 182, 215, 13, 208,
-            99, 194, 72, 99, 213, 55, 220, 0, 66, 217, 160, 55, 213, 39, 247, 120, 214, 36, 177,
-            136, 213, 229, 127, 190, 195, 136, 185, 196, 231, 178, 108, 177, 87, 84, 207, 224, 109,
-            40, 178, 114, 56, 97, 138, 250, 236, 66, 85, 187, 59, 94, 254, 107, 91, 146, 196, 201,
-            222, 9, 195, 145, 225, 45, 102, 192, 41, 150, 47, 57, 93, 133, 122, 100, 192, 242, 7,
-            27, 62, 165, 177, 215, 94, 132, 18, 98, 126, 66, 13, 22, 72, 138, 123, 98, 234, 8, 230,
-            23, 246, 63, 1, 26, 123, 59, 155, 56, 208, 237, 140, 194, 203, 229, 168, 64, 168, 113,
-            59, 109, 33, 83, 45, 247, 32, 100, 174, 75,
-        ];
-        let user_pub_key: RsaPublicKey = RsaPublicKey::from_pkcs1_pem(
-            "-----BEGIN RSA PUBLIC KEY-----
-MIIBCgKCAQEA0bopqNmou2tnYQi6E+D3gFxPUej/cruuR/F6luI6ve6H1dQVL8qF
-+obkS31QQau7/oD0g9r4jI4iVmn6gXLiyrQwgNqSz3p86eN89PtLMBV/QgvBUNEU
-fRzQZRdW9Ofg2yvx26r+8ybxuZ+b+uFqNT4/H0iCchVka4PpLJqROEjEdkAdjUP6
-HQ72YOUAry1o+3mGXB+AhlvbiJIPissE+HZBde63X8GMfdjT98eJBTVRNddxmaBL
-Lex6udaVpJ72SURT1gL80WUdJoAhN+IL6hGzmiHnn5pFDxrW7aRdkQwXy9CYsAzx
-GtkdvVdegW8AZE4+64ZGNSWNd8Qi2tqQlwIDAQAB
------END RSA PUBLIC KEY-----",
+    fn create_user_data() -> (SigningKey<Sha256>, VerifyingKey<Sha256>) {
+        let user_pub_key: RsaPublicKey = RsaPublicKey::from_public_key_pem(
+            "-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA9SjDjbu3d5NG9DfHgiJL
+oV+ITz0TeGIzl1Xt+Sqt1ZhtyjPTRpaxyIRg/xYJqkz6/W7b1pxY9Bv9geBxts28
+coYp3a0CBXrCF0CvJP2LmOwZIACbaLzsY6xzJT4udFONBNMd/nd9Cc+didhJLttz
+x+ARknK7ekHTl0vwdkH5IeFYJ+3gW7TPZTAFmc7YHCmrEfXPQULagxECo9Jhfogl
+vnTTnYSdLeqL3kizKq1bdM8H5MbfKJvEeU4rNj2r6Zj4nijzti2+XgzmTuk2kfWq
+neQ92PvdPLq7T1VAWnoNrsE3e8i3v8XnTtaNfI3ErUvZ8023JQyZd52E43oHg/1Y
+WwIDAQAB
+-----END PUBLIC KEY-----",
         )
         .unwrap();
 
-        (signature, user_pub_key.into())
+        let user_priv_key: RsaPrivateKey = RsaPrivateKey::from_pkcs8_pem(
+            "-----BEGIN PRIVATE KEY-----
+MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQD1KMONu7d3k0b0
+N8eCIkuhX4hPPRN4YjOXVe35Kq3VmG3KM9NGlrHIhGD/FgmqTPr9btvWnFj0G/2B
+4HG2zbxyhindrQIFesIXQK8k/YuY7BkgAJtovOxjrHMlPi50U40E0x3+d30Jz52J
+2Eku23PH4BGScrt6QdOXS/B2Qfkh4Vgn7eBbtM9lMAWZztgcKasR9c9BQtqDEQKj
+0mF+iCW+dNOdhJ0t6oveSLMqrVt0zwfkxt8om8R5Tis2PavpmPieKPO2Lb5eDOZO
+6TaR9aqd5D3Y+908urtPVUBaeg2uwTd7yLe/xedO1o18jcStS9nzTbclDJl3nYTj
+egeD/VhbAgMBAAECggEBAKV97wQuQ5skgDE7tiHSpNs6cfmLcSlCoTD3gL1CYjZd
+vz9P3L852qlRM2j+p2eer4+E1kH5KNMgUfDqYdjU6PEmP/y0XTj1tS+dKp39yc5h
+ElTYFBCP98MRFml9oD5GaFtpaEXuwylsTRxQNJa87Vtvlm0VphjRdtQbHye1QUfs
+VBvREe1rbMB1U8rKUZ7vdw6XvCnsRDRx1qQUGjMgYUDW5ZGV4SksIpuXdT6hrUiq
+HB0F8di3dgS4KOd9yshJJvrIgSMvRs6lNbeJ9DSYvT/2zCCcYdxEvdSLlcRT6RTQ
+D5xmTGyCI3OtKpRJRuakgHC8NZ7edngX7nQwGTFb9IECgYEA/2HxwsMkf++hFjtI
+FDT2VeEC+40hBX7ug2ZNC/RwCawIGQj6z3/Ypk0eb++xsHBx3WHzm2+cOu+NLs0w
+bwNmC+eRAYMZTvQI1UZ8e/UAzbWl/BeTffbBYWbWl0/FQVyu8874L1QSSjRnznnS
+kh9MDYx4r6kOg/4W3P+4OFvyeVcCgYEA9cB+BtQcnJtp9/qjHgc6nMV2m2bd4oeS
+XoX0E6tFc47/iHEyYu8UsuC7D+cPaZdwrI2NpYBIIcV7d7yeNtiQ51IMWaSWdeg7
+xysNwq0tPK7ouuhWTbl7p1lNcAJo/DrHhZ3fwi2VtWtxEiT3OJK/aQbXB4NIffdc
+B0aN+ewzwp0CgYAbu7oyaVi0YASBUozATQQXTWkygh/85cznDhv92Vy1YC488cGy
++PJBFQziIQiN3Zgv72wyDAvORqdxVq0U0SyqzEnt/RupfEzdRFtOZsvgiwJsfu7w
+dfSILE/PfMUyFOuW5HoFQb7+ufQv8wDQB4AN1JxijxxZbyVyeH67+Bg73wKBgQCn
+7pIwOGIU4l7Xhf5RVr9Gwej66KBXXC05SnAvwKoE/YLAyhmUYavTUJ6Dj3GIxmPI
+hjJ1FeQ0r65fdBTphbP/XqHx3/axO7EduN3+Wji/bwa6MmpHUqidAvlXwU3cjo4p
+UGjHWD8lafYqX/hQQHdsXbAzAhNXgODyV9RNJIt6QQKBgQCDIfLzVuZ88p/VQQ2v
+YwOTO9kGfr2Z+EvdB6K/Z20fQdvT2b07M5G16OSIkTAzjuN4k08/eK/gOq2mJMK1
+BDELtfUlKJKksDmcx3zNXH1oXUEwygWHtgNnbvhv7lrZrfEXFORU8WV4c/2OAlM1
+pUt9ee4TLb/KxjITKaebsuHFZg==
+-----END PRIVATE KEY-----",
+        )
+        .unwrap();
+
+        (user_priv_key.into(), user_pub_key.into())
     }
 
     #[tokio::test]
@@ -231,10 +263,12 @@ GtkdvVdegW8AZE4+64ZGNSWNd8Qi2tqQlwIDAQAB
 
     #[tokio::test]
     async fn non_extant_user() {
-        let (signature, verifying_key) = create_user_data();
+        let (mut signing_key, verifying_key) = create_user_data();
         let mut hashmap = HashMap::new();
         hashmap.insert("testUser".to_owned(), verifying_key);
         let app = create_router(hashmap);
+
+        let signature = signing_key.sign(b"junk_data");
 
         let response = app
             .oneshot(
@@ -242,7 +276,7 @@ GtkdvVdegW8AZE4+64ZGNSWNd8Qi2tqQlwIDAQAB
                     .method("POST")
                     .uri("/register_sensor")
                     .header("user", "nontestUser")
-                    .header("signature", BASE64_STANDARD.encode(signature))
+                    .header("signature", BASE64_STANDARD.encode(signature.to_bytes()))
                     .header("encrypted_key", "junk")
                     .body(Body::empty())
                     .unwrap(),
@@ -255,14 +289,16 @@ GtkdvVdegW8AZE4+64ZGNSWNd8Qi2tqQlwIDAQAB
 
     #[tokio::test]
     async fn happy_path() {
-        let (signature, verifying_key) = create_user_data();
+        let (mut signing_key, verifying_key) = create_user_data();
         let mut hashmap = HashMap::new();
         hashmap.insert("testUser".to_owned(), verifying_key);
 
-        let listener = TcpListener::bind("localhost:80").await.unwrap();
+        let mut rng = rand::thread_rng();
+
+        let listener = TcpListener::bind("localhost:8080").await.unwrap();
         tokio::spawn(start(listener, hashmap));
 
-        let response = reqwest::get("http://localhost/server_public_key")
+        let response = reqwest::get("http://localhost:8080/server_public_key")
             .await
             .unwrap()
             .text()
@@ -270,12 +306,21 @@ GtkdvVdegW8AZE4+64ZGNSWNd8Qi2tqQlwIDAQAB
             .unwrap();
 
         let server_pub_key = RsaPublicKey::from_pkcs1_pem(&response).unwrap();
+        let symmetric_key = b"test_data";
+        let enc_key = server_pub_key
+            .encrypt(&mut rng, Pkcs1v15Encrypt, &symmetric_key[..])
+            .unwrap();
 
-        // TODO: finish test
+        let body = b"test body";
+
+        let signature = signing_key.sign(&body[..]);
 
         let client = reqwest::Client::new();
         let response = client
-            .post("http://localhost/register_sensor")
+            .post("http://localhost:8080/register_sensor")
+            .header("user", "testUser")
+            .header("signature", BASE64_STANDARD.encode(signature.to_bytes()))
+            .header("encrypted_key", BASE64_STANDARD.encode(enc_key))
             .send()
             .await
             .unwrap();

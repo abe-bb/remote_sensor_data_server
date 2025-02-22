@@ -204,6 +204,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "common"
+version = "0.1.0"
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1107,6 +1111,7 @@ dependencies = [
  "aes-gcm",
  "axum",
  "base64",
+ "common",
  "rand",
  "reqwest",
  "rsa",
