@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+aes = "0.8.4"
 axum = { version = "0.8.1", features = ["tracing"]}
 base64 = "0.22.1"
+ccm = "0.5.0"
 rand = "0.8.0"
 rsa = { version = "0.9.7", features = ["sha2", "serde", "pem"] }
 serde = { version = "1.0.217", features = ["serde_derive"] }
