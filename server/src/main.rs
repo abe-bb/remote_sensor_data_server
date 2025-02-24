@@ -18,19 +18,21 @@ async fn main() {
     crate::http_server::start(http_listener, HashMap::new(), sensors).await;
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Sensor {
     pub name: String,
     fields: Vec<String>,
     field_types: Vec<FieldType>,
+    key: [u8; 16],
 }
 
 impl Sensor {
-    pub fn new(name: String) -> Self {
+    pub fn new(name: String, key: [u8; 16]) -> Self {
         Sensor {
             name,
             fields: Vec::new(),
             field_types: Vec::new(),
+            key,
         }
     }
 
@@ -40,7 +42,7 @@ impl Sensor {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum FieldType {
     Float,
     Integer,
