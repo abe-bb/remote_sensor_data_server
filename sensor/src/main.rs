@@ -1,7 +1,7 @@
-#![no_main]
+![no_main]
 #![no_std]
 
-use core::fmt::Write;
+use core::{fmt::Write, str::FromStr};
 
 use cortex_m_rt::entry;
 use heapless::{String, Vec};
@@ -12,6 +12,9 @@ use microbit::{
 };
 use panic_halt as _;
 use rtt_target::{rprintln, rtt_init_print};
+
+const MIC_SIZE: u8 = 4;
+const HEADER_SIZE: u8 = 3;
 
 #[entry]
 fn main() -> ! {
@@ -47,25 +50,24 @@ fn main() -> ! {
 
     let mut rng = Rng::new(board.RNG);
 
-    let _ccm = Ccm::init(board.CCM, board.AAR, microbit::hal::ccm::DataRate::_1Mbit);
+    let mut ccm = Ccm::init(board.CCM, board.AAR, microbit::hal::ccm::DataRate::_1Mbit);
     let mut init_vec = [0u8; 8];
-    rng.random(&mut init_vec);
-    let _ccm_data = CcmData::new(
+    // rng.random(&mut init_vec);
+
+    let mut ccm_data = CcmData::new(
         [
             0xfd, 0xa4, 0x92, 0xea, 0x96, 0xad, 0xb6, 0x44, 0x8b, 0xc3, 0x74, 0xd7, 0x1a, 0x53,
             0x52, 0x52,
         ],
-        init_vec,
+        init_vec.clone(),
     );
 
-    // let test_data: String<251> = String::from_str("testdata").unwrap();
-    // let mut len: u8 = 0;
+    let mut counter: u64 = 0;
 
-    // loop {
-    //     encrypt_data(len, &mut ccm, test_data.clone(), &mut ccm_data);
-    //     len += 1;
-    //     timer.delay_ms(100);
-    // }
+    // let test_data: String<251> = String::from_str("test").unwrap();
+
+    // encrypt_data(&mut counter, &mut ccm, test_data.clone(), &mut ccm_data);
+
 
     loop {
         if let Ok(status) = accel_sensor.accel_status() {
@@ -74,14 +76,12 @@ fn main() -> ! {
                 let (x, y, z) = data.xyz_mg();
                 let data = build_data(x, y, z);
                 rprintln!("Accel Data: {}", data);
-                // let result = encrypt_data(0, &mut ccm, data, &mut ccm_data);
-                // rprintln!("encrypted data: {:?}", result);
-                let len = data.len() as u8;
+
+                let encrypted_data = encrypt_data(&mut counter, &mut ccm, data, &mut ccm_data);
+
                 write!(serial, "example_sensor|").unwrap();
-                serial.write(&[len]).unwrap();
-                write!(serial, "|").unwrap();
-                serial.write(data.as_bytes()).unwrap();
-                write!(serial, "\r\n").unwrap();
+                serial.write(encrypted[1]);
+                serial.write(&encrypted_data[3..]).unwrap();
             }
         } else {
             rprintln!("couldn't check accelerometer status");
@@ -113,31 +113,47 @@ fn build_data(x: i32, y: i32, z: i32) -> String<251> {
     data
 }
 
-fn _encrypt_data(
-    len: u8,
-    ccm: &mut Ccm,
-    data: String<251>,
-    ccm_data: &mut CcmData,
-) -> Vec<u8, 258> {
+fn encrypt_data(&mut counter: u64, ccm: &mut Ccm, data: String<251>, ccm_data: &mut CcmData) -> Vec<u8, 258> {
+    let len: u8 = data.len() as u8;
     let mut scratch: Vec<u8, 274> = Vec::new();
-    let mut result = Vec::new();
+    for _ in 0..16 {
+        scratch.push(0).unwrap();
+    }
+
+    let _nonce: [u8; 16] = [0; 16];
+
+    let mut ciphertext = Vec::<u8, 258>::new();
+    for _ in 0..(data.len() as u8 + HEADER_SIZE + MIC_SIZE) {
+        scratch.push(0).unwrap();
+        ciphertext.push(0).unwrap();
+    }
+
+    while scratch.len() < 43 {
+        scratch.push(0).unwrap();
+    }
+
+    rprintln!("data length: {}", data.len());
 
     let mut cleartext: Vec<u8, 254> = Vec::new();
-    cleartext.push(len).unwrap();
-    rprintln!("data: {}", data);
-    rprintln!("length: {}", len);
     cleartext.push(0).unwrap();
+    cleartext.push(len).unwrap();
     cleartext.push(0).unwrap();
     cleartext.extend(data.into_bytes().into_iter());
 
-    rprintln!("Packet:\n{:?}", cleartext);
+    rprintln!("cleartext length: {}", cleartext.len());
+    rprintln!("cipher length: {}", ciphertext.len());
+    rprintln!("scratch length: {}", scratch.len());
 
-    if let Err(e) = ccm.encrypt_packet(ccm_data, &cleartext, &mut result, &mut scratch) {
+    rprintln!("{:?}", &ccm_data);
+
+    if let Err(e) = ccm.encrypt_packet(ccm_data, &cleartext, &mut ciphertext, &mut scratch) {
         rprintln!("Encryption Error: {:?}", e);
     } else {
-        rprintln!("Success!!");
-        panic!("success");
+        counter += 1;
     }
 
-    result
+    rprintln!("{:?}", &scratch);
+    panic!("stop");
+
+    ciphertext
 }
