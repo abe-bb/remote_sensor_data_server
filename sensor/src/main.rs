@@ -1,13 +1,13 @@
-![no_main]
+#![no_main]
 #![no_std]
 
-use core::{fmt::Write, str::FromStr};
+use core::fmt::Write;
 
 use cortex_m_rt::entry;
 use heapless::{String, Vec};
 use lsm303agr::{AccelOutputDataRate, Lsm303agr};
 use microbit::{
-    hal::{ccm::CcmData, twim, uarte, Ccm, Rng, Timer, Uarte},
+    hal::{ccm::CcmData, twim, uarte, Ccm, Timer, Uarte},
     Board,
 };
 use panic_halt as _;
@@ -48,11 +48,8 @@ fn main() -> ! {
 
     let mut read_buf = [0u8; 128];
 
-    let mut rng = Rng::new(board.RNG);
-
     let mut ccm = Ccm::init(board.CCM, board.AAR, microbit::hal::ccm::DataRate::_1Mbit);
-    let mut init_vec = [0u8; 8];
-    // rng.random(&mut init_vec);
+    let init_vec: [u8; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
 
     let mut ccm_data = CcmData::new(
         [
@@ -64,11 +61,6 @@ fn main() -> ! {
 
     let mut counter: u64 = 0;
 
-    // let test_data: String<251> = String::from_str("test").unwrap();
-
-    // encrypt_data(&mut counter, &mut ccm, test_data.clone(), &mut ccm_data);
-
-
     loop {
         if let Ok(status) = accel_sensor.accel_status() {
             if status.xyz_new_data() {
@@ -79,8 +71,9 @@ fn main() -> ! {
 
                 let encrypted_data = encrypt_data(&mut counter, &mut ccm, data, &mut ccm_data);
 
-                write!(serial, "example_sensor|").unwrap();
-                serial.write(encrypted[1]);
+                write!(serial, ">example_sensor<").unwrap();
+                serial.write(&(counter - 1).to_le_bytes()[..5]).unwrap();
+                serial.write(&encrypted_data[1..2]).unwrap();
                 serial.write(&encrypted_data[3..]).unwrap();
             }
         } else {
@@ -113,7 +106,12 @@ fn build_data(x: i32, y: i32, z: i32) -> String<251> {
     data
 }
 
-fn encrypt_data(&mut counter: u64, ccm: &mut Ccm, data: String<251>, ccm_data: &mut CcmData) -> Vec<u8, 258> {
+fn encrypt_data(
+    counter: &mut u64,
+    ccm: &mut Ccm,
+    data: String<251>,
+    ccm_data: &mut CcmData,
+) -> Vec<u8, 258> {
     let len: u8 = data.len() as u8;
     let mut scratch: Vec<u8, 274> = Vec::new();
     for _ in 0..16 {
@@ -132,28 +130,17 @@ fn encrypt_data(&mut counter: u64, ccm: &mut Ccm, data: String<251>, ccm_data: &
         scratch.push(0).unwrap();
     }
 
-    rprintln!("data length: {}", data.len());
-
     let mut cleartext: Vec<u8, 254> = Vec::new();
     cleartext.push(0).unwrap();
     cleartext.push(len).unwrap();
     cleartext.push(0).unwrap();
     cleartext.extend(data.into_bytes().into_iter());
 
-    rprintln!("cleartext length: {}", cleartext.len());
-    rprintln!("cipher length: {}", ciphertext.len());
-    rprintln!("scratch length: {}", scratch.len());
-
-    rprintln!("{:?}", &ccm_data);
-
     if let Err(e) = ccm.encrypt_packet(ccm_data, &cleartext, &mut ciphertext, &mut scratch) {
         rprintln!("Encryption Error: {:?}", e);
     } else {
-        counter += 1;
+        *counter += 1;
     }
-
-    rprintln!("{:?}", &scratch);
-    panic!("stop");
 
     ciphertext
 }
