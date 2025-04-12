@@ -22,16 +22,16 @@ use tokio::{net::TcpListener, sync::RwLock};
 
 use crate::Sensor;
 
-const _RSA_SIZE: usize = 2048;
+const RSA_SIZE: usize = 2048;
 
 fn create_router(
     authorized_users: HashMap<String, VerifyingKey<Sha256>>,
     sensors: Arc<RwLock<HashMap<String, Sensor>>>,
 ) -> Router {
-    // let mut rng = rand::thread_rng();
-    // let priv_key = RsaPrivateKey::new(&mut rng, RSA_SIZE).expect("Couldn't generate rsa key");
-    // let pub_key = RsaPublicKey::from(&priv_key);
-    let (priv_key, pub_key) = create_server_data();
+    let mut rng = rand::thread_rng();
+    let priv_key = RsaPrivateKey::new(&mut rng, RSA_SIZE).expect("Couldn't generate rsa key");
+    let pub_key = RsaPublicKey::from(&priv_key);
+    // let (priv_key, pub_key) = create_server_data();
 
     let app = Router::new()
         .route("/", get(|| async { "Hello, World!\n" }))

@@ -3,6 +3,7 @@
 
 use core::fmt::Write;
 
+use base64::{prelude::BASE64_STANDARD, Engine};
 use cortex_m_rt::entry;
 use heapless::{String, Vec};
 use lsm303agr::{AccelOutputDataRate, Lsm303agr};
@@ -72,7 +73,7 @@ fn main() -> ! {
                 let encrypted_data = encrypt_data(&mut counter, &mut ccm, data, &mut ccm_data);
 
                 write!(serial, ">example_sensor<").unwrap();
-                serial.write(&(counter - 1).to_le_bytes()[..5]).unwrap();
+                serial.write(&(counter - 1).to_le_bytes()[..]).unwrap();
                 serial.write(&encrypted_data[1..2]).unwrap();
                 serial.write(&encrypted_data[3..]).unwrap();
             }

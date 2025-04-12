@@ -43,7 +43,7 @@ async fn handle_data_client(
     loop {
         // read until start of known protocol
         let mut start: Vec<u8> = Vec::new();
-        let Ok(len) = reader.read_until(b'>', &mut start).await else {
+        let Ok(_) = reader.read_until(b'>', &mut start).await else {
             event!(
                 Level::WARN,
                 "Failed to find data transfer sensor data protocol start. Closing connection: {}",
@@ -51,16 +51,15 @@ async fn handle_data_client(
             );
             return;
         };
-        if len == 0 {
-            event!(Level::INFO, "Connection closed by client");
-            return;
-        }
         if start.len() > 1 {
             event!(
                 Level::INFO,
                 "Read {} bytes without finding sensor data protocol start",
                 start.len() - 1
             );
+        } else {
+            event!(Level::INFO, "Connection closed by client");
+            return;
         }
         start.clear();
 
@@ -103,6 +102,8 @@ async fn handle_data_client(
             };
             counter[i] = byte;
         }
+
+        println!("counter bytes: {:?}", counter);
 
         // read encrypted packet size
         let Ok(encrypted_packet_size) = reader.read_u8().await else {
