@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 aes = "0.8.4"
 ccm = "0.5.0"
-clap = "4.5.36"
+clap = { version = "4.5.36", features = ["derive"] }
 rsa = { version = "0.9.7", features = ["sha2", "serde", "pem"] }
 reqwest = { version = "0.12.15", features = ["blocking"] }
+base64 = "0.22.1"

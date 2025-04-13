@@ -1,8 +1,9 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use axum::{
     body::Bytes,
-    extract::State,
+    debug_handler,
+    extract::{ConnectInfo, Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -10,6 +11,7 @@ use axum::{
 };
 
 use base64::{prelude::BASE64_STANDARD, Engine};
+use rand::Rng;
 use rsa::{
     pkcs1::EncodeRsaPublicKey,
     pkcs1v15::{Signature, VerifyingKey},
@@ -19,10 +21,12 @@ use rsa::{
     RsaPrivateKey, RsaPublicKey,
 };
 use tokio::{net::TcpListener, sync::RwLock};
+use tracing::{event, instrument, Level};
 
 use crate::Sensor;
 
 const RSA_SIZE: usize = 2048;
+const CHALLENGE_SIZE: usize = 64;
 
 fn create_router(
     authorized_users: HashMap<String, VerifyingKey<Sha256>>,
@@ -35,11 +39,13 @@ fn create_router(
 
     let app = Router::new()
         .route("/", get(|| async { "Hello, World!\n" }))
+        .route("/challenge/{user}", get(challenge))
         .route("/register_sensor", post(register_sensor))
         .route("/deregister_sensor", post(deregister_sensor))
         .route("/server_public_key", get(server_public_key))
         .with_state(Arc::new(AppState {
             authorized_users,
+            user_challenges: RwLock::new(HashMap::new()),
             server_public_key: pub_key,
             _server_private_key: priv_key,
             sensors,
@@ -50,23 +56,66 @@ fn create_router(
 
 pub async fn start(
     tcp_listener: TcpListener,
-    mut authorized_users: HashMap<String, VerifyingKey<Sha256>>,
+    authorized_users: HashMap<String, VerifyingKey<Sha256>>,
     sensors: Arc<RwLock<HashMap<String, Sensor>>>,
 ) {
-    let (_priv_key, pub_key) = create_server_data();
-    authorized_users.insert("example_user".to_owned(), pub_key.into());
     let app = create_router(authorized_users, sensors);
+    let app = app.into_make_service_with_connect_info::<SocketAddr>();
 
     axum::serve(tcp_listener, app).await.unwrap();
 }
 
+#[instrument(skip_all)]
+#[debug_handler]
+async fn challenge(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Path(user): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> [u8; CHALLENGE_SIZE] {
+    // generate challenge response
+    let mut challenge = [0; CHALLENGE_SIZE];
+    {
+        let mut rng = rand::thread_rng();
+        rng.fill(&mut challenge);
+    }
+
+    // check if use exists
+    if !state.authorized_users.contains_key(&user) {
+        event!(
+            Level::WARN,
+            "{} requested challenge for non-existant user \"{}\"",
+            addr.ip(),
+            user
+        );
+    } else {
+        event!(
+            Level::INFO,
+            "{} requested challenge for authorized user \"{}\"",
+            addr.ip(),
+            user
+        );
+
+        // update user challenge
+        let mut user_challenges = state.user_challenges.write().await;
+        user_challenges.insert(user, challenge.clone());
+    } // write lock scope ends
+    challenge
+}
+
+#[instrument(skip(state, headers, body))]
 async fn register_sensor(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let (status, sensor) =
-        authenticate_and_parse_sensor(headers, body, &state.authorized_users).await;
+    let (status, sensor) = authenticate_and_parse_sensor(
+        headers,
+        body,
+        &state.authorized_users,
+        &state.user_challenges,
+    )
+    .await;
 
     let Some(sensor) = sensor else {
         return status;
@@ -86,13 +135,21 @@ async fn register_sensor(
 
     StatusCode::OK
 }
+
+#[instrument(skip(state, headers, body))]
 async fn deregister_sensor(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let (status, sensor) =
-        authenticate_and_parse_sensor(headers, body, &state.authorized_users).await;
+    let (status, sensor) = authenticate_and_parse_sensor(
+        headers,
+        body,
+        &state.authorized_users,
+        &state.user_challenges,
+    )
+    .await;
 
     let Some(sensor) = sensor else {
         return status;
@@ -109,72 +166,132 @@ async fn deregister_sensor(
     } // write lock dropped
 }
 
-async fn server_public_key(State(state): State<Arc<AppState>>) -> String {
+#[instrument(skip(state))]
+async fn server_public_key(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+) -> String {
+    event!(Level::INFO, "{} requested server's public key", addr.ip());
+
     state
         .server_public_key
         .to_pkcs1_pem(rsa::pkcs8::LineEnding::LF)
         .unwrap()
 }
 
+#[instrument(skip_all)]
 async fn authenticate_and_parse_sensor(
     headers: HeaderMap,
     body: Bytes,
     authorized_users: &HashMap<String, VerifyingKey<Sha256>>,
+    user_challenges: &RwLock<HashMap<String, [u8; CHALLENGE_SIZE]>>,
 ) -> (StatusCode, Option<Sensor>) {
     // check for appropriate headers
-    if !(headers.contains_key("user") && headers.contains_key("signature")) {
+    if !(headers.contains_key("user")
+        && headers.contains_key("signature")
+        && headers.contains_key("key")
+        && headers.contains_key("challenge"))
+    {
+        event!(Level::INFO, "Invalid header format");
         return (StatusCode::BAD_REQUEST, None);
     }
 
-    let (user_header, signature_header) = (
+    let (user_header, signature_header, key_header, challenge_header) = (
         headers.get("user").unwrap(),
         headers.get("signature").unwrap(),
+        headers.get("key").unwrap(),
+        headers.get("challenge").unwrap(),
     );
 
-    // check for valid user, signature, and key
+    // check for valid user, signature, and key format
     let Ok(user) = user_header.to_str() else {
-        println!("missing user");
+        event!(Level::INFO, "invalid user header. Not UTF-8");
         return (StatusCode::BAD_REQUEST, None);
     };
     let Ok(signature) = signature_header.to_str() else {
-        println!("missing signature");
+        event!(Level::INFO, "invalid signature header. Not UTF-8");
         return (StatusCode::BAD_REQUEST, None);
     };
-
-    // convert from Base64 to binary
-    let Ok(signature) = BASE64_STANDARD.decode(signature) else {
-        println!("missing signature");
+    let Ok(key) = key_header.to_str() else {
+        event!(Level::INFO, "invalid key header. Not UTF-8");
         return (StatusCode::BAD_REQUEST, None);
     };
-
-    // construct signature from binary
-    let Ok(signature) = Signature::try_from(&signature[..]) else {
-        println!("invalid signature");
+    let Ok(challenge) = challenge_header.to_str() else {
+        event!(Level::INFO, "invalid key header. Not UTF-8");
         return (StatusCode::BAD_REQUEST, None);
     };
 
     // check that the user exists
     if !authorized_users.contains_key(user) {
-        println!("user: {} is not authorized", user);
+        event!(Level::WARN, "Recieved request from unknown user");
         return (StatusCode::UNAUTHORIZED, None);
     }
 
-    // check that signature matches declared user
+    // Construct challenge signature
+    let Ok(challenge) = BASE64_STANDARD.decode(challenge) else {
+        event!(Level::INFO, "invalid challenge. Not base64 encoded");
+        return (StatusCode::BAD_REQUEST, None);
+    };
+    let Ok(challenge) = Signature::try_from(&challenge[..]) else {
+        event!(Level::INFO, "invalid challenge signature");
+        return (StatusCode::BAD_REQUEST, None);
+    };
+
+    // Verify that the challenge signature matches expected value
     let user_verification_key = authorized_users.get(user).unwrap();
+    {
+        // read lock scope
+        let challenges = user_challenges.read().await;
+        if !challenges.contains_key(user) {
+            event!(
+                Level::INFO,
+                "{} attempted request without active challenge",
+                user
+            );
+            return (StatusCode::FORBIDDEN, None);
+        }
+
+        let Ok(_) = user_verification_key.verify(challenges.get(user).unwrap(), &challenge) else {
+            // user challenge failed
+            event!(Level::WARN, "{} failed challenge verification", user);
+            return (StatusCode::FORBIDDEN, None);
+        };
+    } // end of read lock scope
+
+    // Construct signature
+    let Ok(signature) = BASE64_STANDARD.decode(signature) else {
+        event!(Level::INFO, "invalid signature. Not base64 encoded");
+        return (StatusCode::BAD_REQUEST, None);
+    };
+    let Ok(signature) = Signature::try_from(&signature[..]) else {
+        event!(Level::INFO, "invalid signature");
+        return (StatusCode::BAD_REQUEST, None);
+    };
+
+    // check that signature matches declared user
     let Ok(_) = user_verification_key.verify(&body[..], &signature) else {
-        println!("signature verification failed");
+        event!(
+            Level::WARN,
+            "message body signature verification failed for {}",
+            user
+        );
         return (StatusCode::UNAUTHORIZED, None);
     };
 
     // Deserialize sensor from body
     let Ok(sensor): Result<Sensor, _> = serde_json::from_slice(&body) else {
+        event!(
+            Level::INFO,
+            "Failed to deserialized sensor for authenticated user {}",
+            user
+        );
         return (StatusCode::BAD_REQUEST, None);
     };
 
     (StatusCode::OK, Some(sensor))
 }
 
-fn create_server_data() -> (RsaPrivateKey, RsaPublicKey) {
+fn user_data() -> (RsaPrivateKey, RsaPublicKey) {
     let user_pub_key: RsaPublicKey = RsaPublicKey::from_public_key_pem(
         "-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA9SjDjbu3d5NG9DfHgiJL
@@ -220,11 +337,12 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
     )
     .unwrap();
 
-    (user_priv_key.into(), user_pub_key.into())
+    (user_priv_key, user_pub_key)
 }
 
 struct AppState {
     authorized_users: HashMap<String, VerifyingKey<Sha256>>,
+    user_challenges: RwLock<HashMap<String, [u8; CHALLENGE_SIZE]>>,
     server_public_key: RsaPublicKey,
     _server_private_key: RsaPrivateKey,
     sensors: Arc<RwLock<HashMap<String, Sensor>>>,
@@ -292,17 +410,18 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
 
     #[tokio::test]
     async fn register_missing_headers() {
-        let sensors = Arc::new(RwLock::new(HashMap::new()));
-        let app = create_router(HashMap::new(), sensors);
+        let (mut _signing_key, verifying_key) = create_user_data();
+        let mut hashmap = HashMap::new();
+        hashmap.insert("testUser".to_owned(), verifying_key.clone());
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/register_sensor")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        let listener = TcpListener::bind("localhost:8090").await.unwrap();
+        let sensors = Arc::new(RwLock::new(HashMap::new()));
+        tokio::spawn(start(listener, hashmap, sensors));
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post("http://localhost:8090/register_sensor")
+            .send()
             .await
             .unwrap();
 
@@ -311,17 +430,18 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
 
     #[tokio::test]
     async fn register_invalid_method() {
-        let sensors = Arc::new(RwLock::new(HashMap::new()));
-        let app = create_router(HashMap::new(), sensors);
+        let (mut _signing_key, verifying_key) = create_user_data();
+        let mut hashmap = HashMap::new();
+        hashmap.insert("testUser".to_owned(), verifying_key.clone());
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/register_sensor")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        let listener = TcpListener::bind("localhost:8089").await.unwrap();
+        let sensors = Arc::new(RwLock::new(HashMap::new()));
+        tokio::spawn(start(listener, hashmap, sensors));
+
+        let client = reqwest::Client::new();
+        let response = client
+            .get("http://localhost:8089/register_sensor")
+            .send()
             .await
             .unwrap();
 
@@ -330,42 +450,42 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
 
     #[tokio::test]
     async fn register_non_extant_user() {
-        let (mut signing_key, verifying_key) = create_user_data();
+        let (mut _signing_key, verifying_key) = create_user_data();
         let mut hashmap = HashMap::new();
-        hashmap.insert("testUser".to_owned(), verifying_key);
+        hashmap.insert("testUser".to_owned(), verifying_key.clone());
+
+        let listener = TcpListener::bind("localhost:8081").await.unwrap();
         let sensors = Arc::new(RwLock::new(HashMap::new()));
-        let app = create_router(hashmap, sensors);
+        tokio::spawn(start(listener, hashmap, sensors));
 
-        let signature = signing_key.sign(b"junk_data");
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/register_sensor")
-                    .header("user", "nontestUser")
-                    .header("signature", BASE64_STANDARD.encode(signature.to_bytes()))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        let client = reqwest::Client::new();
+        let response = client
+            .post("http://localhost:8081/register_sensor")
+            .header("user", "nontestUser")
+            .header("signature", "junk")
+            .header("key", "junk")
+            .header("challenge", "junk")
+            .send()
             .await
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
+
     #[tokio::test]
     async fn deregister_missing_headers() {
-        let sensors = Arc::new(RwLock::new(HashMap::new()));
-        let app = create_router(HashMap::new(), sensors);
+        let (mut _signing_key, verifying_key) = create_user_data();
+        let mut hashmap = HashMap::new();
+        hashmap.insert("testUser".to_owned(), verifying_key.clone());
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/deregister_sensor")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        let listener = TcpListener::bind("localhost:8082").await.unwrap();
+        let sensors = Arc::new(RwLock::new(HashMap::new()));
+        tokio::spawn(start(listener, hashmap, sensors));
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post("http://localhost:8082/deregister_sensor")
+            .send()
             .await
             .unwrap();
 
@@ -374,17 +494,18 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
 
     #[tokio::test]
     async fn deregister_invalid_method() {
-        let sensors = Arc::new(RwLock::new(HashMap::new()));
-        let app = create_router(HashMap::new(), sensors);
+        let (mut _signing_key, verifying_key) = create_user_data();
+        let mut hashmap = HashMap::new();
+        hashmap.insert("testUser".to_owned(), verifying_key.clone());
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/deregister_sensor")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        let listener = TcpListener::bind("localhost:8083").await.unwrap();
+        let sensors = Arc::new(RwLock::new(HashMap::new()));
+        tokio::spawn(start(listener, hashmap, sensors));
+
+        let client = reqwest::Client::new();
+        let response = client
+            .get("http://localhost:8083/deregister_sensor")
+            .send()
             .await
             .unwrap();
 
@@ -393,24 +514,22 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
 
     #[tokio::test]
     async fn deregister_non_extant_user() {
-        let (mut signing_key, verifying_key) = create_user_data();
+        let (mut _signing_key, verifying_key) = create_user_data();
         let mut hashmap = HashMap::new();
-        hashmap.insert("testUser".to_owned(), verifying_key);
+        hashmap.insert("testUser".to_owned(), verifying_key.clone());
+
+        let listener = TcpListener::bind("localhost:8091").await.unwrap();
         let sensors = Arc::new(RwLock::new(HashMap::new()));
-        let app = create_router(hashmap, sensors);
+        tokio::spawn(start(listener, hashmap, sensors));
 
-        let signature = signing_key.sign(b"junk_data");
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/deregister_sensor")
-                    .header("user", "nontestUser")
-                    .header("signature", BASE64_STANDARD.encode(signature.to_bytes()))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        let client = reqwest::Client::new();
+        let response = client
+            .post("http://localhost:8091/deregister_sensor")
+            .header("user", "nonexistant")
+            .header("signature", "junk")
+            .header("challenge", "junk")
+            .header("key", "junk")
+            .send()
             .await
             .unwrap();
 
@@ -423,22 +542,35 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
         let mut hashmap = HashMap::new();
         hashmap.insert("testUser".to_owned(), verifying_key);
         let sensors = Arc::new(RwLock::new(HashMap::new()));
-        let app = create_router(hashmap, sensors);
 
-        let body = serde_json::to_string(&Sensor::new("testSensor".to_owned(), [0u8; 16])).unwrap();
+        let body = serde_json::to_string(&Sensor::new("testSensor".to_owned(), [0u8; 16], [0; 8]))
+            .unwrap();
 
         let signature = signing_key.sign(body.as_bytes());
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/deregister_sensor")
-                    .header("user", "testUser")
-                    .header("signature", BASE64_STANDARD.encode(signature.to_bytes()))
-                    .body(body)
-                    .unwrap(),
+        let listner = TcpListener::bind("localhost:8093").await.unwrap();
+        tokio::spawn(start(listner, hashmap, sensors));
+
+        let client = reqwest::Client::new();
+        let challenge_response = client
+            .get("http://localhost:8093/challenge/testUser")
+            .send()
+            .await
+            .unwrap();
+        let challenge = challenge_response.bytes().await.unwrap();
+        let challenge_signature = signing_key.sign(&challenge);
+
+        let response = client
+            .post("http://localhost:8093/deregister_sensor")
+            .header("user", "testUser")
+            .header("signature", BASE64_STANDARD.encode(signature.to_bytes()))
+            .header(
+                "challenge",
+                BASE64_STANDARD.encode(challenge_signature.to_bytes()),
             )
+            .header("key", "junk")
+            .body(body)
+            .send()
             .await
             .unwrap();
 
@@ -455,25 +587,52 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
         let sensors = Arc::new(RwLock::new(HashMap::new()));
         tokio::spawn(start(listener, hashmap, sensors));
 
-        let body = serde_json::to_string(&Sensor::new("testSensor".to_owned(), [0u8; 16])).unwrap();
+        let body = serde_json::to_string(&Sensor::new("testSensor".to_owned(), [0u8; 16], [0; 8]))
+            .unwrap();
 
         let signature = signing_key.sign(body.as_bytes());
 
         let client = reqwest::Client::new();
+        let challenge_response = client
+            .get("http://localhost:8080/challenge/testUser")
+            .send()
+            .await
+            .unwrap();
+        let challenge = challenge_response.bytes().await.unwrap();
+        let challenge_signature = signing_key.sign(&challenge);
+
         let response = client
             .post("http://localhost:8080/register_sensor")
             .header("user", "testUser")
             .header("signature", BASE64_STANDARD.encode(signature.to_bytes()))
+            .header("key", "junk")
+            .header(
+                "challenge",
+                BASE64_STANDARD.encode(challenge_signature.to_bytes()),
+            )
             .body(body.clone())
             .send()
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
+        let challenge_response = client
+            .get("http://localhost:8080/challenge/testUser")
+            .send()
+            .await
+            .unwrap();
+        let challenge = challenge_response.bytes().await.unwrap();
+        let challenge_signature = signing_key.sign(&challenge);
+
         let response = client
             .post("http://localhost:8080/deregister_sensor")
             .header("user", "testUser")
             .header("signature", BASE64_STANDARD.encode(signature.to_bytes()))
+            .header("key", "junk")
+            .header(
+                "challenge",
+                BASE64_STANDARD.encode(challenge_signature.to_bytes()),
+            )
             .body(body)
             .send()
             .await
