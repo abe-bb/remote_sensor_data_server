@@ -3,7 +3,6 @@
 
 use core::fmt::Write;
 
-use base64::{prelude::BASE64_STANDARD, Engine};
 use cortex_m_rt::entry;
 use heapless::{String, Vec};
 use lsm303agr::{AccelOutputDataRate, Lsm303agr};
@@ -13,6 +12,7 @@ use microbit::{
 };
 use panic_halt as _;
 use rtt_target::{rprintln, rtt_init_print};
+use sha2::{Digest, Sha256};
 
 const MIC_SIZE: u8 = 4;
 const HEADER_SIZE: u8 = 3;
@@ -24,6 +24,11 @@ fn main() -> ! {
 
     let mut timer = Timer::new(board.TIMER0);
     let mut accel_delay_timer = Timer::new(board.TIMER2);
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"this is a test");
+    let result = hasher.finalize();
+    rprintln!("hash: {:?}", result);
 
     let mut serial = Uarte::new(
         board.UARTE0,
