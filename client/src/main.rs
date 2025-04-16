@@ -2,7 +2,7 @@ use clap::Parser;
 use reqwest::blocking::Client;
 use rsa::{
     pkcs1::{DecodeRsaPublicKey, EncodeRsaPublicKey},
-    RsaPublicKey,
+    RsaPrivateKey, RsaPublicKey,
 };
 
 const SERVER_PREFIX: &str = "http://localhost:3000";
@@ -34,6 +34,10 @@ struct Args {
     /// register example_sensor
     #[arg(short, long)]
     register_sensor: bool,
+}
+
+fn load_user_keys() -> (RsaPublicKey, RsaPrivateKey) {
+    todo!()
 }
 
 fn register_example_sensor(client: &Client) {}
