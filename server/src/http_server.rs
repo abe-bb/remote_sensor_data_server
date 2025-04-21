@@ -32,11 +32,6 @@ fn create_router(
     authorized_users: HashMap<String, VerifyingKey<Sha256>>,
     sensors: Arc<RwLock<HashMap<String, Sensor>>>,
 ) -> Router {
-    tracing_subscriber::fmt()
-        .with_env_filter("info,project_server=debug")
-        .try_init()
-        .ok();
-
     let mut rng = rand::thread_rng();
     let priv_key = RsaPrivateKey::new(&mut rng, RSA_SIZE).expect("Couldn't generate rsa key");
     let pub_key = RsaPublicKey::from(&priv_key);
@@ -566,8 +561,9 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
         hashmap.insert("testUser".to_owned(), verifying_key);
         let sensors = Arc::new(RwLock::new(HashMap::new()));
 
-        let body = serde_json::to_string(&Sensor::new("testSensor".to_owned(), [0u8; 16], [0; 8]))
-            .unwrap();
+        let body =
+            serde_json::to_string(&Sensor::new("testSensor".to_owned(), [0u8; 16], [0; 8], 1))
+                .unwrap();
 
         let signature = signing_key.sign(body.as_bytes());
 
@@ -610,8 +606,9 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
         let sensors = Arc::new(RwLock::new(HashMap::new()));
         tokio::spawn(start(listener, hashmap, sensors));
 
-        let body = serde_json::to_string(&Sensor::new("testSensor".to_owned(), [0u8; 16], [0; 8]))
-            .unwrap();
+        let body =
+            serde_json::to_string(&Sensor::new("testSensor".to_owned(), [0u8; 16], [0; 8], 1))
+                .unwrap();
 
         let signature = signing_key.sign(body.as_bytes());
 
@@ -673,8 +670,9 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
         let sensors = Arc::new(RwLock::new(HashMap::new()));
         tokio::spawn(start(listener, hashmap, sensors));
 
-        let body = serde_json::to_string(&Sensor::new("testSensor".to_owned(), [0u8; 16], [0; 8]))
-            .unwrap();
+        let body =
+            serde_json::to_string(&Sensor::new("testSensor".to_owned(), [0u8; 16], [0; 8], 1))
+                .unwrap();
 
         let signature = signing_key.sign(body.as_bytes());
 
@@ -702,8 +700,9 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
         let sensors = Arc::new(RwLock::new(HashMap::new()));
         tokio::spawn(start(listener, hashmap, sensors));
 
-        let body = serde_json::to_string(&Sensor::new("testSensor".to_owned(), [0u8; 16], [0; 8]))
-            .unwrap();
+        let body =
+            serde_json::to_string(&Sensor::new("testSensor".to_owned(), [0u8; 16], [0; 8], 1))
+                .unwrap();
 
         let signature = signing_key.sign(body.as_bytes());
 
