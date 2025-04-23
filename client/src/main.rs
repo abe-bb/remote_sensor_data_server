@@ -51,13 +51,35 @@ fn main() {
     }
 
     // register test sensor
+    if args.unauthorized_user {
+        if server_public_key.is_none() {
+            server_public_key = Some(get_server_public_key(&client));
+        }
+        let server_pub_key = server_public_key.as_ref().unwrap();
+        let url = SERVER_PREFIX.to_string() + "/register_sensor";
+        sensor_action(
+            url,
+            EXAMPLE_SENSOR,
+            server_pub_key,
+            "unauthorized_user",
+            args.fail_challenge,
+        );
+    }
+
+    // register test sensor
     if args.register_sensor {
         if server_public_key.is_none() {
             server_public_key = Some(get_server_public_key(&client));
         }
         let server_pub_key = server_public_key.as_ref().unwrap();
         let url = SERVER_PREFIX.to_string() + "/register_sensor";
-        sensor_action(url, EXAMPLE_SENSOR, server_pub_key);
+        sensor_action(
+            url,
+            EXAMPLE_SENSOR,
+            server_pub_key,
+            "test_user",
+            args.fail_challenge,
+        );
     }
 
     // deregister test sensor
@@ -67,7 +89,13 @@ fn main() {
         }
         let server_pub_key = server_public_key.as_ref().unwrap();
         let url = SERVER_PREFIX.to_string() + "/deregister_sensor";
-        sensor_action(url, EXAMPLE_SENSOR, server_pub_key);
+        sensor_action(
+            url,
+            EXAMPLE_SENSOR,
+            server_pub_key,
+            "test_user",
+            args.fail_challenge,
+        );
     }
 
     // register bad sensor
@@ -77,7 +105,13 @@ fn main() {
         }
         let server_pub_key = server_public_key.as_ref().unwrap();
         let url = SERVER_PREFIX.to_string() + "/register_sensor";
-        sensor_action(url, BAD_SENSOR, server_pub_key);
+        sensor_action(
+            url,
+            BAD_SENSOR,
+            server_pub_key,
+            "test_user",
+            args.fail_challenge,
+        );
     }
 
     // deregister bad sensor
@@ -87,7 +121,13 @@ fn main() {
         }
         let server_pub_key = server_public_key.as_ref().unwrap();
         let url = SERVER_PREFIX.to_string() + "/deregister_sensor";
-        sensor_action(url, BAD_SENSOR, server_pub_key);
+        sensor_action(
+            url,
+            BAD_SENSOR,
+            server_pub_key,
+            "test_user",
+            args.fail_challenge,
+        );
     }
 
     // deregister missing sensor
@@ -97,7 +137,13 @@ fn main() {
         }
         let server_pub_key = server_public_key.as_ref().unwrap();
         let url = SERVER_PREFIX.to_string() + "/deregister_sensor";
-        sensor_action(url, MISSING_SENSOR, server_pub_key);
+        sensor_action(
+            url,
+            MISSING_SENSOR,
+            server_pub_key,
+            "test_user",
+            args.fail_challenge,
+        );
     }
 
     if args.test_data {
@@ -120,11 +166,11 @@ impl CcmData {
         }
     }
 
-    fn increment_counter(&mut self) {
+    fn _increment_counter(&mut self) {
         self.counter += 1;
     }
 
-    fn get_counter(&self) -> u64 {
+    fn _get_counter(&self) -> u64 {
         self.counter
     }
 
@@ -144,6 +190,14 @@ struct Args {
     /// get server public key
     #[arg(short, long)]
     server_key: bool,
+
+    /// unauthorized user
+    #[arg(short, long)]
+    unauthorized_user: bool,
+
+    /// fail challenge
+    #[arg(short, long)]
+    fail_challenge: bool,
 
     /// register example_sensor
     #[arg(short, long)]
@@ -212,7 +266,13 @@ fn test_data() {
     }
 }
 
-fn sensor_action(url: String, body: &str, server_pub_key: &RsaPublicKey) {
+fn sensor_action(
+    url: String,
+    body: &str,
+    server_pub_key: &RsaPublicKey,
+    user: &str,
+    fail_challenge: bool,
+) {
     let (key_header, encrypted_body) = encrypt_body(body.as_bytes(), server_pub_key);
 
     let (_pub_key, priv_key) = load_user_keys();
@@ -221,11 +281,16 @@ fn sensor_action(url: String, body: &str, server_pub_key: &RsaPublicKey) {
 
     let client: Client = Client::new();
     let challenge = get_challenge(&client);
-    let challenge_signature = sign_data(&challenge, &mut signing_key);
+    let challenge_signature = if fail_challenge {
+        let bad_challenge: [u8; 7] = [55, 55, 55, 55, 55, 55, 55];
+        sign_data(&bad_challenge, &mut signing_key)
+    } else {
+        sign_data(&challenge, &mut signing_key)
+    };
 
     let response = client
         .post(url)
-        .header("user", "test_user")
+        .header("user", user)
         .header("signature", BASE64_STANDARD.encode(signature))
         .header("key", BASE64_STANDARD.encode(key_header))
         .header("challenge", BASE64_STANDARD.encode(challenge_signature))

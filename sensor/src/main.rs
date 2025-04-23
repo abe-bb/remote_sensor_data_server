@@ -16,6 +16,8 @@ use sha2::{Digest, Sha256};
 
 const MIC_SIZE: u8 = 4;
 const HEADER_SIZE: u8 = 3;
+const KEY_INTERVAL: u32 = 10;
+const SEED_SIZE: usize = 2048 / 8;
 
 #[entry]
 fn main() -> ! {
@@ -24,11 +26,6 @@ fn main() -> ! {
 
     let mut timer = Timer::new(board.TIMER0);
     let mut accel_delay_timer = Timer::new(board.TIMER2);
-
-    let mut hasher = Sha256::new();
-    hasher.update(b"this is a test");
-    let result = hasher.finalize();
-    rprintln!("hash: {:?}", result);
 
     let mut serial = Uarte::new(
         board.UARTE0,
@@ -64,13 +61,15 @@ fn main() -> ! {
         init_vec.clone(),
     );
 
-    let mut counter: u64 = 0;
+    let mut counter: u32 = 0;
+    let mut prev_interval = 0;
+
+    let mut seed: [u8; SEED_SIZE + 4] = [0u8; SEED_SIZE + 4];
 
     let data: String<251> =
         String::from_str("{\"accel_x\": -608, \"accel_y\": -32, \"accel_z\": 800}").unwrap();
     let encrypted_data = encrypt_data(&mut counter, &mut ccm, data, &mut ccm_data);
     rprintln!("ciphertext length: {}", encrypted_data[1]);
-    loop {}
 
     loop {
         if let Ok(status) = accel_sensor.accel_status() {
@@ -79,6 +78,14 @@ fn main() -> ! {
                 let (x, y, z) = data.xyz_mg();
                 let data = build_data(x, y, z);
                 rprintln!("Accel Data: {}", data);
+
+                // rotate keys on specified interval
+                let interval_counter = counter / KEY_INTERVAL;
+                if interval_counter != prev_interval {
+                    prev_interval = interval_counter;
+
+                    update_key(&mut ccm_data, interval_counter, &mut seed);
+                }
 
                 let encrypted_data = encrypt_data(&mut counter, &mut ccm, data, &mut ccm_data);
 
@@ -105,6 +112,20 @@ fn main() -> ! {
     }
 }
 
+fn update_key(ccm: &mut CcmData, interval_counter: u32, seed: &mut [u8; SEED_SIZE + 4]) {
+    let mut hasher = Sha256::new();
+    let bytes = interval_counter.to_be_bytes();
+    for i in 0..4 {
+        seed[i] = bytes[i];
+    }
+
+    hasher.update(&seed);
+    let result = hasher.finalize();
+    let key: [u8; 16] = result[0..16].try_into().unwrap();
+
+    ccm.set_key(key);
+}
+
 fn build_data(x: i32, y: i32, z: i32) -> String<251> {
     let mut data: String<251> = String::new();
     write!(
@@ -118,7 +139,7 @@ fn build_data(x: i32, y: i32, z: i32) -> String<251> {
 }
 
 fn encrypt_data(
-    counter: &mut u64,
+    counter: &mut u32,
     ccm: &mut Ccm,
     data: String<251>,
     ccm_data: &mut CcmData,

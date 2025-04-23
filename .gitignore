@@ -1,3 +1,5 @@
 /fuzzer_results
+/submission
+*.zip
 *.png
 data.txt

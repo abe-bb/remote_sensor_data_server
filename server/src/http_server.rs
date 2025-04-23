@@ -623,9 +623,13 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
         hashmap.insert("testUser".to_owned(), verifying_key);
         let sensors = Arc::new(RwLock::new(HashMap::new()));
 
-        let body =
-            serde_json::to_string(&Sensor::new("testSensor".to_owned(), [0u8; 16], [0; 8], 1))
-                .unwrap();
+        let body = serde_json::to_string(&Sensor::new(
+            "testSensor".to_owned(),
+            [0u8; 260].to_vec(),
+            [0; 8],
+            1,
+        ))
+        .unwrap();
 
         let listner = TcpListener::bind("localhost:8093").await.unwrap();
         tokio::spawn(start(listner, hashmap, sensors));
@@ -672,9 +676,13 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
         let sensors = Arc::new(RwLock::new(HashMap::new()));
         tokio::spawn(start(listener, hashmap, sensors));
 
-        let body =
-            serde_json::to_string(&Sensor::new("testSensor".to_owned(), [0u8; 16], [0; 8], 1))
-                .unwrap();
+        let body = serde_json::to_string(&Sensor::new(
+            "testSensor".to_owned(),
+            [0u8; 260].to_vec(),
+            [0; 8],
+            1,
+        ))
+        .unwrap();
 
         let client = reqwest::Client::new();
         let server_public_key =
@@ -740,9 +748,13 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
         let sensors = Arc::new(RwLock::new(HashMap::new()));
         tokio::spawn(start(listener, hashmap, sensors));
 
-        let body =
-            serde_json::to_string(&Sensor::new("testSensor".to_owned(), [0u8; 16], [0; 8], 1))
-                .unwrap();
+        let body = serde_json::to_string(&Sensor::new(
+            "testSensor".to_owned(),
+            [0u8; 260].to_vec(),
+            [0; 8],
+            1,
+        ))
+        .unwrap();
 
         let signature = signing_key.sign(body.as_bytes());
 
@@ -770,9 +782,13 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
         let sensors = Arc::new(RwLock::new(HashMap::new()));
         tokio::spawn(start(listener, hashmap, sensors));
 
-        let body =
-            serde_json::to_string(&Sensor::new("testSensor".to_owned(), [0u8; 16], [0; 8], 1))
-                .unwrap();
+        let body = serde_json::to_string(&Sensor::new(
+            "testSensor".to_owned(),
+            [0u8; 260].to_vec(),
+            [0; 8],
+            1,
+        ))
+        .unwrap();
 
         let signature = signing_key.sign(body.as_bytes());
 

@@ -13,6 +13,7 @@ rand = "0.8.0"
 rsa = { version = "0.9.7", features = ["sha2", "serde", "pem"] }
 serde = { version = "1.0.217", features = ["serde_derive"] }
 serde_json = "1.0.139"
+sha2 = "0.10.8"
 tokio = { version = "1.43.0", features = ["full", "tracing",] }
 tower = "0.5.2"
 tracing = "0.1.41"

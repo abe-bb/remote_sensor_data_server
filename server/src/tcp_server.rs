@@ -96,7 +96,7 @@ async fn handle_data_client(
             );
             continue;
         };
-        event!(Level::DEBUG, "Read sensor name: {} from {}", name, socket);
+        event!(Level::TRACE, "Read sensor name: {} from {}", name, socket);
 
         // read counter
         let mut counter: [u8; 5] = [0; 5];
@@ -158,7 +158,8 @@ async fn handle_data_client(
             Ok(bytes) => {
                 event!(
                     Level::INFO,
-                    "Decrypted packet: {}",
+                    "Recieved packet from {}: {}",
+                    name,
                     String::from_utf8(bytes).unwrap()
                 )
             }
@@ -171,38 +172,6 @@ async fn handle_data_client(
                 );
             }
         }
-
-        // // read encrypted packet length
-        // let mut buffer: Vec<u8> = Vec::new();
-        // let Ok(bytes) = reader.read_until('|' as u8, &mut buffer).await else {
-        //     // Invalid format, drop the connection
-        //     return;
-        // };
-        // if bytes != 2 {
-        //     // invalid format, drop the connection
-        //     return;
-        // }
-        // let len: u8 = buffer[1];
-
-        // // read encrypted data
-        // let mut nonce: Vec<u8> = vec![0; len as usize];
-        // let Ok(_) = reader.read_exact(&mut nonce[..]).await else {
-        //     // data read failure, drop the connection
-        //     return;
-        // };
-        // let enc_data = nonce.split_off(13);
-
-        // let Ok(dec_data) = cipher.decrypt(GenericArray::from_slice(&nonce), &enc_data[..]) else {
-        //     // decryption failed, drop the connection
-        //     return;
-        // };
-
-        // let Ok(value): Result<Value, _> = serde_json::from_slice(&dec_data) else {
-        //     // unexpected data packet, drop the connection
-        //     return;
-        // };
-
-        // println!("{}", String::from_utf8(nonce).unwrap());
     }
 }
 

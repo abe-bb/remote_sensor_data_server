@@ -1,7 +1,7 @@
 mod http_server;
 mod tcp_server;
 
-use ccm::aead::generic_array::GenericArray;
+use ccm::aead::{generic_array::GenericArray, Buffer};
 use rsa::{pkcs1v15::VerifyingKey, pkcs8::DecodePublicKey, sha2::Sha256, RsaPublicKey};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, sync::Arc};
@@ -9,6 +9,7 @@ use std::{collections::HashMap, fs, sync::Arc};
 use tokio::{net::TcpListener, sync::RwLock};
 
 const USER_PATH: &str = "authorized_users/";
+const SEED_SIZE: usize = 2048 / 8;
 
 #[tokio::main]
 async fn main() {
@@ -80,7 +81,7 @@ pub struct Sensor {
     pub name: String,
     fields: Vec<String>,
     field_types: Vec<FieldType>,
-    key: [u8; 16],
+    key: Vec<u8>,
     interval: u32,
     ccm_data: CcmData,
 }
@@ -110,7 +111,9 @@ impl CcmData {
 }
 
 impl Sensor {
-    pub fn new(name: String, key: [u8; 16], iv: [u8; 8], interval: u32) -> Self {
+    pub fn new(name: String, key: Vec<u8>, iv: [u8; 8], interval: u32) -> Self {
+        assert_eq!(SEED_SIZE + 4, key.len());
+
         Sensor {
             name,
             fields: Vec::new(),
