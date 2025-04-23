@@ -1,7 +1,7 @@
 #![no_main]
 #![no_std]
 
-use core::fmt::Write;
+use core::{fmt::Write, str::FromStr};
 
 use cortex_m_rt::entry;
 use heapless::{String, Vec};
@@ -59,13 +59,18 @@ fn main() -> ! {
 
     let mut ccm_data = CcmData::new(
         [
-            0xfd, 0xa4, 0x92, 0xea, 0x96, 0xad, 0xb6, 0x44, 0x8b, 0xc3, 0x74, 0xd7, 0x1a, 0x53,
-            0x52, 0x52,
+            253, 164, 146, 234, 150, 173, 182, 68, 139, 195, 116, 215, 26, 83, 82, 82,
         ],
         init_vec.clone(),
     );
 
     let mut counter: u64 = 0;
+
+    let data: String<251> =
+        String::from_str("{\"accel_x\": -608, \"accel_y\": -32, \"accel_z\": 800}").unwrap();
+    let encrypted_data = encrypt_data(&mut counter, &mut ccm, data, &mut ccm_data);
+    rprintln!("ciphertext length: {}", encrypted_data[1]);
+    loop {}
 
     loop {
         if let Ok(status) = accel_sensor.accel_status() {

@@ -1,8 +1,19 @@
-use std::fs;
+use std::{
+    fs::{self, File},
+    io::{BufRead, BufReader, BufWriter, Write},
+    net::TcpStream,
+    thread::sleep,
+    time::Duration,
+};
 
+use aes::Aes128;
 use aes_gcm::Aes256Gcm;
 use base64::{prelude::BASE64_STANDARD, Engine};
-use ccm::{aead::Aead, AeadCore, KeyInit};
+use ccm::{
+    aead::Aead,
+    consts::{U13, U4},
+    AeadCore, Ccm, KeyInit,
+};
 use clap::Parser;
 use reqwest::blocking::Client;
 use rsa::{
@@ -38,6 +49,7 @@ fn main() {
                 .unwrap()
         )
     }
+
     // register test sensor
     if args.register_sensor {
         if server_public_key.is_none() {
@@ -87,6 +99,43 @@ fn main() {
         let url = SERVER_PREFIX.to_string() + "/deregister_sensor";
         sensor_action(url, MISSING_SENSOR, server_pub_key);
     }
+
+    if args.test_data {
+        test_data();
+    }
+}
+
+struct CcmData {
+    counter: u64,
+    _direction: bool,
+    iv: [u8; 8],
+}
+
+impl CcmData {
+    fn new(iv: [u8; 8]) -> Self {
+        CcmData {
+            counter: 0,
+            _direction: false,
+            iv,
+        }
+    }
+
+    fn increment_counter(&mut self) {
+        self.counter += 1;
+    }
+
+    fn get_counter(&self) -> u64 {
+        self.counter
+    }
+
+    fn generate_nonce(&self) -> [u8; 13] {
+        let mut nonce: Vec<u8> = Vec::new();
+        nonce.extend_from_slice(&self.counter.to_le_bytes()[..5]);
+        nonce.extend_from_slice(&self.iv);
+
+        assert_eq!(13, nonce.len());
+        nonce.try_into().unwrap()
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -115,6 +164,52 @@ struct Args {
     /// deregister missing_sensor
     #[arg(long)]
     deregister_missing: bool,
+
+    #[arg(short, long)]
+    test_data: bool,
+}
+
+pub type Aes128Ccm = Ccm<Aes128, U4, U13>;
+
+fn test_data() {
+    let file = File::open("../data.txt").unwrap();
+    let reader = BufReader::new(file);
+
+    let stream = TcpStream::connect("127.0.0.1:8000").unwrap();
+    let mut writer = BufWriter::new(stream);
+
+    let ccm_data = CcmData::new([0, 1, 2, 3, 4, 5, 6, 7]);
+
+    let key = [
+        253, 164, 146, 234, 150, 173, 182, 68, 139, 195, 116, 215, 26, 83, 82, 82,
+    ];
+    let cipher = Aes128Ccm::new_from_slice(&key).unwrap();
+
+    let ciphertext = cipher
+        .encrypt(
+            (&ccm_data.generate_nonce()).into(),
+            "{\"accel_x\": -608, \"accel_y\": -32, \"accel_z\": 800}".as_bytes(),
+        )
+        .unwrap();
+
+    println!("ciphertext length: {}", ciphertext.len());
+
+    for line in reader.lines() {
+        let line = line.unwrap();
+        writer.write(b">example_sensor<").unwrap();
+        writer.write(&ccm_data.counter.to_le_bytes()[..5]).unwrap();
+
+        let ciphertext = cipher
+            .encrypt((&ccm_data.generate_nonce()).into(), line.as_bytes())
+            .unwrap();
+
+        let len: u8 = ciphertext.len() as u8;
+        let len = [len];
+        writer.write(&len).unwrap();
+        writer.write(&ciphertext[..]).unwrap();
+        writer.flush().unwrap();
+        sleep(Duration::from_millis(900));
+    }
 }
 
 fn sensor_action(url: String, body: &str, server_pub_key: &RsaPublicKey) {

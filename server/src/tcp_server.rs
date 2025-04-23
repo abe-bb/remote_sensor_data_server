@@ -41,6 +41,7 @@ async fn handle_data_client(
     let _writer = BufWriter::new(tx);
 
     loop {
+        event!(Level::DEBUG, "starting main loop");
         // read until start of known protocol
         let mut start: Vec<u8> = Vec::new();
         let Ok(_) = reader.read_until(b'>', &mut start).await else {
@@ -58,10 +59,14 @@ async fn handle_data_client(
                 start.len() - 1
             );
         } else {
-            event!(Level::INFO, "Connection closed by client");
+            event!(
+                Level::INFO,
+                "Connection closed while finding protocol beginning"
+            );
             return;
         }
         start.clear();
+        event!(Level::DEBUG, "protocol start found");
 
         // read sensor name
         let Ok(len) = reader.read_until(b'<', &mut start).await else {
@@ -73,9 +78,13 @@ async fn handle_data_client(
             return;
         };
         if len == 0 {
-            event!(Level::INFO, "Connection closed by client");
+            event!(
+                Level::INFO,
+                "Connection closed while finding end of sensor name"
+            );
             return;
         }
+        event!(Level::DEBUG, "end of sensor name found");
 
         // decode sensor name
         start.pop().unwrap();
@@ -102,8 +111,6 @@ async fn handle_data_client(
             };
             counter[i] = byte;
         }
-
-        println!("counter bytes: {:?}", counter);
 
         // read encrypted packet size
         let Ok(encrypted_packet_size) = reader.read_u8().await else {

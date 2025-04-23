@@ -14,7 +14,7 @@ const USER_PATH: &str = "authorized_users/";
 async fn main() {
     // set up tracing
     tracing_subscriber::fmt()
-        .with_env_filter("info,project_server=debug")
+        .with_env_filter("debug,project_server=debug")
         .init();
 
     let http_listener = TcpListener::bind("0.0.0.0:3000").await.unwrap();
