@@ -7,15 +7,18 @@ use clap::Parser;
 use reqwest::blocking::Client;
 use rsa::{
     pkcs1::{DecodeRsaPublicKey, EncodeRsaPublicKey},
+    pkcs1v15::SigningKey,
     pkcs8::{DecodePrivateKey, DecodePublicKey},
     sha2::Sha256,
+    signature::{SignatureEncoding, SignerMut},
     Oaep, RsaPrivateKey, RsaPublicKey,
 };
 
 const SERVER_PREFIX: &str = "http://localhost:3000";
 
 const EXAMPLE_SENSOR: &str = "{\"name\":\"example_sensor\",\"fields\":[\"x_accel\",\"y_accel\",\"z_accel\"],\"field_types\":[\"Integer\",\"Integer\",\"Integer\"],\"key\":[253,164,146,234,150,173,182,68,139,195,116,215,26,83,82,82],\"interval\":10,\"ccm_data\":{\"_direction_bit\":false,\"iv\":[0,1,2,3,4,5,6,7]}}";
-const BAD_SENSOR: &str = "{\"name\":\"bad_sensor\",\"fields\":[\"x_accel\",\"y_accel\",\"z_accel\"],\"field_types\":[\"Integer\",\"Integer\",\"Integer\"],\"key\":[253,164,146,234,150,173,182,68,139,195,116,215,26,83,82,82],\"interval\":10,\"ccm_data\":{\"_direction_bit\":false,\"iv\":[0,1,2,3,4,5,6,7]}}";
+const MISSING_SENSOR: &str = "{\"name\":\"missing_sensor\",\"fields\":[\"x_accel\",\"y_accel\",\"z_accel\"],\"field_types\":[\"Integer\",\"Integer\",\"Integer\"],\"key\":[253,164,146,234,150,173,182,68,139,195,116,215,26,83,82,82],\"interval\":10,\"ccm_data\":{\"_direction_bit\":false,\"iv\":[0,1,2,3,4,5,6,7]}}";
+const BAD_SENSOR: &str = "{\"ae\":\"bad_sensor\",\"fields\":[\"x_accel\",\"y_accel\",\"z_accel\"],\"field_types\":[\"Integer\",\"Integer\",\"Integer\"],\"key\":[253,164,146,234,150,173,182,68,139,195,116,215,26,83,82,82],\"interval\":10,\"ccm_data\":{\"_direction_bit\":false,\"iv\":[0,1,2,3,4,5,6,7]}}";
 
 fn main() {
     let args = Args::parse();
@@ -40,11 +43,49 @@ fn main() {
         if server_public_key.is_none() {
             server_public_key = Some(get_server_public_key(&client));
         }
+        let server_pub_key = server_public_key.as_ref().unwrap();
+        let url = SERVER_PREFIX.to_string() + "/register_sensor";
+        sensor_action(url, EXAMPLE_SENSOR, server_pub_key);
+    }
 
-        let (key_header, encrypted_body) = encrypt_body(
-            EXAMPLE_SENSOR.as_bytes(),
-            server_public_key.as_ref().unwrap(),
-        );
+    // deregister test sensor
+    if args.deregister_sensor {
+        if server_public_key.is_none() {
+            server_public_key = Some(get_server_public_key(&client));
+        }
+        let server_pub_key = server_public_key.as_ref().unwrap();
+        let url = SERVER_PREFIX.to_string() + "/deregister_sensor";
+        sensor_action(url, EXAMPLE_SENSOR, server_pub_key);
+    }
+
+    // register bad sensor
+    if args.register_bad_sensor {
+        if server_public_key.is_none() {
+            server_public_key = Some(get_server_public_key(&client));
+        }
+        let server_pub_key = server_public_key.as_ref().unwrap();
+        let url = SERVER_PREFIX.to_string() + "/register_sensor";
+        sensor_action(url, BAD_SENSOR, server_pub_key);
+    }
+
+    // deregister bad sensor
+    if args.deregister_bad_sensor {
+        if server_public_key.is_none() {
+            server_public_key = Some(get_server_public_key(&client));
+        }
+        let server_pub_key = server_public_key.as_ref().unwrap();
+        let url = SERVER_PREFIX.to_string() + "/deregister_sensor";
+        sensor_action(url, BAD_SENSOR, server_pub_key);
+    }
+
+    // deregister missing sensor
+    if args.deregister_missing {
+        if server_public_key.is_none() {
+            server_public_key = Some(get_server_public_key(&client));
+        }
+        let server_pub_key = server_public_key.as_ref().unwrap();
+        let url = SERVER_PREFIX.to_string() + "/deregister_sensor";
+        sensor_action(url, MISSING_SENSOR, server_pub_key);
     }
 }
 
@@ -58,9 +99,67 @@ struct Args {
     /// register example_sensor
     #[arg(short, long)]
     register_sensor: bool,
+
+    /// deregister example_sensor
+    #[arg(short, long)]
+    deregister_sensor: bool,
+
+    /// register badly formatted sensor
+    #[arg(long)]
+    register_bad_sensor: bool,
+
+    /// deregister badly formatted sensor
+    #[arg(long)]
+    deregister_bad_sensor: bool,
+
+    /// deregister missing_sensor
+    #[arg(long)]
+    deregister_missing: bool,
 }
 
-fn encrypt_body(body: &[u8], server_public_key: &RsaPublicKey) -> (String, Vec<u8>) {
+fn sensor_action(url: String, body: &str, server_pub_key: &RsaPublicKey) {
+    let (key_header, encrypted_body) = encrypt_body(body.as_bytes(), server_pub_key);
+
+    let (_pub_key, priv_key) = load_user_keys();
+    let mut signing_key: SigningKey<Sha256> = priv_key.into();
+    let signature = sign_data(&encrypted_body, &mut signing_key);
+
+    let client: Client = Client::new();
+    let challenge = get_challenge(&client);
+    let challenge_signature = sign_data(&challenge, &mut signing_key);
+
+    let response = client
+        .post(url)
+        .header("user", "test_user")
+        .header("signature", BASE64_STANDARD.encode(signature))
+        .header("key", BASE64_STANDARD.encode(key_header))
+        .header("challenge", BASE64_STANDARD.encode(challenge_signature))
+        .body(encrypted_body)
+        .send()
+        .unwrap();
+
+    println!(
+        "Server Response: {:?}",
+        response.status().canonical_reason()
+    );
+}
+
+fn get_challenge(client: &Client) -> Vec<u8> {
+    let response = client
+        .get(SERVER_PREFIX.to_string() + "/challenge/test_user")
+        .send()
+        .unwrap();
+
+    let challenge = response.bytes().unwrap().to_vec();
+    challenge
+}
+
+fn sign_data(data: &[u8], signing_key: &mut SigningKey<Sha256>) -> Box<[u8]> {
+    let signature = signing_key.sign(data);
+    signature.to_bytes()
+}
+
+fn encrypt_body(body: &[u8], server_public_key: &RsaPublicKey) -> (Vec<u8>, Vec<u8>) {
     let mut rng = rand::thread_rng();
     let key = Aes256Gcm::generate_key(&mut rng);
     let cipher = Aes256Gcm::new(&key);
@@ -71,14 +170,13 @@ fn encrypt_body(body: &[u8], server_public_key: &RsaPublicKey) -> (String, Vec<u
     key_nonce.extend(key.iter());
     key_nonce.extend(nonce.iter());
 
-    let enc_data = server_public_key
+    let enc_key = server_public_key
         .encrypt(&mut rng, padding, &key_nonce)
         .unwrap();
 
-    let enc_body = cipher.encrypt(&nonce, EXAMPLE_SENSOR.as_bytes()).unwrap();
-    let key_header = BASE64_STANDARD.encode(enc_data);
+    let enc_body = cipher.encrypt(&nonce, body).unwrap();
 
-    (key_header, enc_body)
+    (enc_key, enc_body)
 }
 
 fn load_user_keys() -> (RsaPublicKey, RsaPrivateKey) {
@@ -90,8 +188,6 @@ fn load_user_keys() -> (RsaPublicKey, RsaPrivateKey) {
 
     (pub_key, priv_key)
 }
-
-fn register_example_sensor(client: &Client) {}
 
 fn get_server_public_key(client: &Client) -> RsaPublicKey {
     let server_string_key = client

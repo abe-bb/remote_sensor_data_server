@@ -21,24 +21,21 @@ async fn main() {
 
     let data_listener = TcpListener::bind("0.0.0.0:8000").await.unwrap();
 
-    let example_sensor = Sensor {
-        name: "example_sensor".to_string(),
-        fields: vec![
-            "x_accel".to_string(),
-            "y_accel".to_string(),
-            "z_accel".to_string(),
-        ],
-        field_types: vec![FieldType::Integer, FieldType::Integer, FieldType::Integer],
-        key: [
-            0xfd, 0xa4, 0x92, 0xea, 0x96, 0xad, 0xb6, 0x44, 0x8b, 0xc3, 0x74, 0xd7, 0x1a, 0x53,
-            0x52, 0x52,
-        ],
-        ccm_data: CcmData::new([0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8]),
-        interval: 10,
-    };
-
-    println!("{}", serde_json::to_string(&example_sensor).unwrap());
-    return;
+    // let example_sensor = Sensor {
+    //     name: "example_sensor".to_string(),
+    //     fields: vec![
+    //         "x_accel".to_string(),
+    //         "y_accel".to_string(),
+    //         "z_accel".to_string(),
+    //     ],
+    //     field_types: vec![FieldType::Integer, FieldType::Integer, FieldType::Integer],
+    //     key: [
+    //         0xfd, 0xa4, 0x92, 0xea, 0x96, 0xad, 0xb6, 0x44, 0x8b, 0xc3, 0x74, 0xd7, 0x1a, 0x53,
+    //         0x52, 0x52,
+    //     ],
+    //     ccm_data: CcmData::new([0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8]),
+    //     interval: 10,
+    // };
 
     let sensor_map = HashMap::new();
     // hashmap.insert("example_sensor".to_string(), example_sensor);

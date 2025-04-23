@@ -1,5 +1,6 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
+use aes_gcm::{Aes256Gcm, Key, KeyInit};
 use axum::{
     body::Bytes,
     debug_handler,
@@ -11,6 +12,7 @@ use axum::{
 };
 
 use base64::{prelude::BASE64_STANDARD, Engine};
+use ccm::aead::Aead;
 use rand::Rng;
 use rsa::{
     pkcs1::EncodeRsaPublicKey,
@@ -18,7 +20,7 @@ use rsa::{
     pkcs8::{DecodePrivateKey, DecodePublicKey},
     sha2::Sha256,
     signature::Verifier,
-    RsaPrivateKey, RsaPublicKey,
+    Oaep, RsaPrivateKey, RsaPublicKey,
 };
 use tokio::{net::TcpListener, sync::RwLock};
 use tracing::{event, instrument, Level};
@@ -35,7 +37,6 @@ fn create_router(
     let mut rng = rand::thread_rng();
     let priv_key = RsaPrivateKey::new(&mut rng, RSA_SIZE).expect("Couldn't generate rsa key");
     let pub_key = RsaPublicKey::from(&priv_key);
-    // let (priv_key, pub_key) = create_server_data();
 
     let app = Router::new()
         .route("/", get(|| async { "Hello, World!\n" }))
@@ -47,7 +48,7 @@ fn create_router(
             authorized_users,
             user_challenges: RwLock::new(HashMap::new()),
             server_public_key: pub_key,
-            _server_private_key: priv_key,
+            server_private_key: priv_key,
             sensors,
         }));
 
@@ -114,6 +115,7 @@ async fn register_sensor(
         body,
         &state.authorized_users,
         &state.user_challenges,
+        &state.server_private_key,
     )
     .await;
 
@@ -158,6 +160,7 @@ async fn deregister_sensor(
         body,
         &state.authorized_users,
         &state.user_challenges,
+        &state.server_private_key,
     )
     .await;
 
@@ -205,6 +208,7 @@ async fn authenticate_and_parse_sensor(
     body: Bytes,
     authorized_users: &HashMap<String, VerifyingKey<Sha256>>,
     user_challenges: &RwLock<HashMap<String, [u8; CHALLENGE_SIZE]>>,
+    server_priv_key: &RsaPrivateKey,
 ) -> (StatusCode, Option<Sensor>) {
     // check for appropriate headers
     if !(headers.contains_key("user")
@@ -232,7 +236,7 @@ async fn authenticate_and_parse_sensor(
         event!(Level::INFO, "invalid signature header. Not UTF-8");
         return (StatusCode::BAD_REQUEST, None);
     };
-    let Ok(_key) = key_header.to_str() else {
+    let Ok(key) = key_header.to_str() else {
         event!(Level::INFO, "invalid key header. Not UTF-8");
         return (StatusCode::BAD_REQUEST, None);
     };
@@ -292,16 +296,43 @@ async fn authenticate_and_parse_sensor(
     let Ok(_) = user_verification_key.verify(&body[..], &signature) else {
         event!(
             Level::WARN,
-            "message body signature verification failed for {}",
+            "body signature verification failed for {}",
             user
         );
         return (StatusCode::UNAUTHORIZED, None);
     };
 
+    let Ok(key) = BASE64_STANDARD.decode(key) else {
+        event!(Level::INFO, "invalid key header. Not base64 encoded");
+        return (StatusCode::BAD_REQUEST, None);
+    };
+
+    let padding = Oaep::new::<Sha256>();
+    let Ok(key_nonce) = server_priv_key.decrypt(padding, &key) else {
+        event!(Level::WARN, "failed to decrypt body encryption key");
+        return (StatusCode::BAD_REQUEST, None);
+    };
+
+    // validate key length (32 bit key + 12 bit nonce)
+    if key_nonce.len() != 44 {
+        event!(Level::WARN, "invalid key format provided");
+        return (StatusCode::BAD_REQUEST, None);
+    }
+    let key = &key_nonce[0..32];
+    let key = Key::<Aes256Gcm>::from_slice(key);
+    let nonce = &key_nonce[32..];
+
+    // decrypt body using aes_gcm
+    let cipher = Aes256Gcm::new(&key);
+    let Ok(plaintext) = cipher.decrypt(nonce.into(), &body[..]) else {
+        event!(Level::WARN, "failed to decrypt body using provided key");
+        return (StatusCode::BAD_REQUEST, None);
+    };
+
     // Deserialize sensor from body
-    let Ok(sensor): Result<Sensor, _> = serde_json::from_slice(&body) else {
+    let Ok(sensor): Result<Sensor, _> = serde_json::from_slice(&plaintext) else {
         event!(
-            Level::INFO,
+            Level::WARN,
             "Failed to deserialized sensor for authenticated user {}",
             user
         );
@@ -364,14 +395,17 @@ struct AppState {
     authorized_users: HashMap<String, VerifyingKey<Sha256>>,
     user_challenges: RwLock<HashMap<String, [u8; CHALLENGE_SIZE]>>,
     server_public_key: RsaPublicKey,
-    _server_private_key: RsaPrivateKey,
+    server_private_key: RsaPrivateKey,
     sensors: Arc<RwLock<HashMap<String, Sensor>>>,
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+    use aes_gcm::AeadCore;
+    use reqwest::Client;
     use rsa::{
+        pkcs1::DecodeRsaPublicKey,
         pkcs1v15::SigningKey,
         pkcs8::{DecodePrivateKey, DecodePublicKey},
         signature::{SignatureEncoding, SignerMut},
@@ -424,6 +458,34 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
         .unwrap();
 
         (user_priv_key.into(), user_pub_key.into())
+    }
+
+    fn encrypt_body(body: &[u8], server_public_key: &RsaPublicKey) -> (Vec<u8>, Vec<u8>) {
+        let mut rng = rand::thread_rng();
+        let key = Aes256Gcm::generate_key(&mut rng);
+        let cipher = Aes256Gcm::new(&key);
+        let nonce = Aes256Gcm::generate_nonce(&mut rng);
+
+        let padding = Oaep::new::<Sha256>();
+        let mut key_nonce = Vec::new();
+        key_nonce.extend(key.iter());
+        key_nonce.extend(nonce.iter());
+
+        let enc_key = server_public_key
+            .encrypt(&mut rng, padding, &key_nonce)
+            .unwrap();
+
+        let enc_body = cipher.encrypt(&nonce, body).unwrap();
+
+        (enc_key, enc_body)
+    }
+
+    async fn get_server_public_key(client: &Client, url: &str) -> RsaPublicKey {
+        let server_string_key = client.get(url).send().await.unwrap().text().await.unwrap();
+
+        let server_public_key = RsaPublicKey::from_pkcs1_pem(&server_string_key).unwrap();
+
+        server_public_key
     }
 
     #[tokio::test]
@@ -565,12 +627,16 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
             serde_json::to_string(&Sensor::new("testSensor".to_owned(), [0u8; 16], [0; 8], 1))
                 .unwrap();
 
-        let signature = signing_key.sign(body.as_bytes());
-
         let listner = TcpListener::bind("localhost:8093").await.unwrap();
         tokio::spawn(start(listner, hashmap, sensors));
 
         let client = reqwest::Client::new();
+        let server_public_key =
+            get_server_public_key(&client, "http://localhost:8093/server_public_key").await;
+        let (enc_key, enc_body) = encrypt_body(body.as_bytes(), &server_public_key);
+
+        let signature = signing_key.sign(&enc_body);
+
         let challenge_response = client
             .get("http://localhost:8093/challenge/testUser")
             .send()
@@ -587,8 +653,8 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
                 "challenge",
                 BASE64_STANDARD.encode(challenge_signature.to_bytes()),
             )
-            .header("key", "junk")
-            .body(body)
+            .header("key", BASE64_STANDARD.encode(enc_key))
+            .body(enc_body)
             .send()
             .await
             .unwrap();
@@ -610,9 +676,13 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
             serde_json::to_string(&Sensor::new("testSensor".to_owned(), [0u8; 16], [0; 8], 1))
                 .unwrap();
 
-        let signature = signing_key.sign(body.as_bytes());
-
         let client = reqwest::Client::new();
+        let server_public_key =
+            get_server_public_key(&client, "http://localhost:8080/server_public_key").await;
+        let (enc_key, enc_body) = encrypt_body(body.as_bytes(), &server_public_key);
+
+        let signature = signing_key.sign(&enc_body);
+
         let challenge_response = client
             .get("http://localhost:8080/challenge/testUser")
             .send()
@@ -625,12 +695,12 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
             .post("http://localhost:8080/register_sensor")
             .header("user", "testUser")
             .header("signature", BASE64_STANDARD.encode(signature.to_bytes()))
-            .header("key", "junk")
+            .header("key", BASE64_STANDARD.encode(enc_key.clone()))
             .header(
                 "challenge",
                 BASE64_STANDARD.encode(challenge_signature.to_bytes()),
             )
-            .body(body.clone())
+            .body(enc_body.clone())
             .send()
             .await
             .unwrap();
@@ -648,12 +718,12 @@ pUt9ee4TLb/KxjITKaebsuHFZg==
             .post("http://localhost:8080/deregister_sensor")
             .header("user", "testUser")
             .header("signature", BASE64_STANDARD.encode(signature.to_bytes()))
-            .header("key", "junk")
+            .header("key", BASE64_STANDARD.encode(enc_key))
             .header(
                 "challenge",
                 BASE64_STANDARD.encode(challenge_signature.to_bytes()),
             )
-            .body(body)
+            .body(enc_body)
             .send()
             .await
             .unwrap();
